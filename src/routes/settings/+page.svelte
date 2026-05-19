@@ -16,7 +16,8 @@
 		Users,
 		Info,
 		GitBranch,
-		Tags
+		Tags,
+		Server
 	} from 'lucide-svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 
@@ -31,6 +32,7 @@
 	import AuthTab from './auth/AuthTab.svelte';
 	import LicenseTab from './license/LicenseTab.svelte';
 	import AboutTab from './about/AboutTab.svelte';
+	import ProxmoxTab from './proxmox/ProxmoxTab.svelte';
 
 	// Tab state from URL
 	let activeTab = $derived($page.url.searchParams.get('tab') || 'general');
@@ -81,6 +83,10 @@
 				<Users class="w-4 h-4" />
 				Authentication
 			</Tabs.Trigger>
+			<Tabs.Trigger value="proxmox" class="flex-1 flex items-center justify-center gap-1.5">
+				<Server class="w-4 h-4" />
+				Proxmox
+			</Tabs.Trigger>
 			<Tabs.Trigger value="license" class="flex-1 flex items-center justify-center gap-1.5">
 				<Crown class="w-4 h-4" />
 				License
@@ -121,6 +127,10 @@
 
 		<Tabs.Content value="auth" class="flex-1 min-h-0 flex flex-col">
 			{#if activeTab === 'auth'}<AuthTab onTabChange={handleTabChange} />{/if}
+		</Tabs.Content>
+
+		<Tabs.Content value="proxmox" class="flex-1 min-h-0 overflow-y-auto">
+			{#if activeTab === 'proxmox'}<ProxmoxTab />{/if}
 		</Tabs.Content>
 
 		<Tabs.Content value="license" class="flex-1 min-h-0 overflow-y-auto">
