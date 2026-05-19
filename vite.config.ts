@@ -1182,6 +1182,10 @@ export default defineConfig({
 	build: {
 		target: 'esnext',
 		minify: 'esbuild',
-		sourcemap: false
+		sourcemap: false,
+		// Disable gzip size reporting — purely cosmetic output but causes a large
+		// memory spike (reads all output chunks back into memory to compress them).
+		// This is the most common cause of OOM kills on low-RAM build hosts.
+		reportCompressedSize: false
 	}
 });
