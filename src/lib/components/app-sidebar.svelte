@@ -22,7 +22,8 @@
 		User,
 		ClipboardList,
 		Activity,
-		Timer
+		Timer,
+		Server
 	} from 'lucide-svelte';
 	import { licenseStore } from '$lib/stores/license';
 	import { authStore, hasAnyAccess } from '$lib/stores/auth';
@@ -104,6 +105,7 @@
 		{ href: '/registry', Icon: Download, label: 'Registry', permission: 'registries' },
 		{ href: '/activity', Icon: Activity, label: 'Activity', permission: 'activity' },
 		{ href: '/schedules', Icon: Timer, label: 'Schedules', permission: 'schedules' },
+		{ href: '/proxmox', Icon: Server, label: 'Proxmox', permission: 'always' },
 		{ href: '/audit', Icon: ClipboardList, label: 'Audit log', permission: 'audit_logs', enterpriseOnly: true },
 		{ href: '/settings', Icon: Settings, label: 'Settings', permission: 'settings' }
 	] as const;
