@@ -17,7 +17,8 @@
 		Info,
 		GitBranch,
 		Tags,
-		Server
+		Server,
+		ShieldCheck
 	} from 'lucide-svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 
@@ -33,6 +34,7 @@
 	import LicenseTab from './license/LicenseTab.svelte';
 	import AboutTab from './about/AboutTab.svelte';
 	import ProxmoxTab from './proxmox/ProxmoxTab.svelte';
+	import OPNsenseTab from './opnsense/OPNsenseTab.svelte';
 
 	// Tab state from URL
 	let activeTab = $derived($page.url.searchParams.get('tab') || 'general');
@@ -87,6 +89,10 @@
 				<Server class="w-4 h-4" />
 				Proxmox
 			</Tabs.Trigger>
+			<Tabs.Trigger value="opnsense" class="flex-1 flex items-center justify-center gap-1.5">
+				<ShieldCheck class="w-4 h-4" />
+				OPNsense
+			</Tabs.Trigger>
 			<Tabs.Trigger value="license" class="flex-1 flex items-center justify-center gap-1.5">
 				<Crown class="w-4 h-4" />
 				License
@@ -131,6 +137,10 @@
 
 		<Tabs.Content value="proxmox" class="flex-1 min-h-0 overflow-y-auto">
 			{#if activeTab === 'proxmox'}<ProxmoxTab />{/if}
+		</Tabs.Content>
+
+		<Tabs.Content value="opnsense" class="flex-1 min-h-0 overflow-y-auto">
+			{#if activeTab === 'opnsense'}<OPNsenseTab />{/if}
 		</Tabs.Content>
 
 		<Tabs.Content value="license" class="flex-1 min-h-0 overflow-y-auto">

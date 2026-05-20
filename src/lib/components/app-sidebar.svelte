@@ -23,7 +23,8 @@
 		ClipboardList,
 		Activity,
 		Timer,
-		Server
+		Server,
+		ShieldCheck
 	} from 'lucide-svelte';
 	import { licenseStore } from '$lib/stores/license';
 	import { authStore, hasAnyAccess } from '$lib/stores/auth';
@@ -97,6 +98,8 @@
 		{ href: '/', Icon: LayoutDashboard, label: 'Dashboard', permission: 'always' },
 		{ href: '/proxmox', Icon: Server, label: 'Proxmox', permission: 'always' },
 		{ href: '/containers', Icon: Box, label: 'Containers', permission: 'containers' },
+		{ href: '/opnsense', Icon: ShieldCheck, label: 'OPNsense', permission: 'always' },
+		{ href: '/opnsense/leases', Icon: Network, label: 'DHCP Leases', permission: 'always' },
 		{ href: '/logs', Icon: ScrollText, label: 'Logs', permission: 'containers' },
 		{ href: '/terminal', Icon: Terminal, label: 'Shell', permission: 'containers' },
 		{ href: '/stacks', Icon: Layers, label: 'Stacks', permission: 'stacks' },
