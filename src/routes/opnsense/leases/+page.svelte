@@ -169,7 +169,13 @@
 						{#each filtered as lease, i}
 							<tr class="border-b last:border-0 {i % 2 === 0 ? 'bg-background' : 'bg-muted/20'} hover:bg-muted/40 transition-colors">
 								<td class="px-3 py-2 font-mono">{lease.ip}</td>
-								<td class="px-3 py-2">{lease.hostname || <span class="text-muted-foreground italic">—</span>}</td>
+								<td class="px-3 py-2">
+									{#if lease.hostname}
+										{lease.hostname}
+									{:else}
+										<span class="text-muted-foreground italic">—</span>
+									{/if}
+								</td>
 								<td class="px-3 py-2 font-mono text-muted-foreground">{lease.mac}</td>
 								<td class="px-3 py-2 text-muted-foreground">{lease.description || '—'}</td>
 								<td class="px-3 py-2 font-mono text-muted-foreground">{lease.interface || '—'}</td>
