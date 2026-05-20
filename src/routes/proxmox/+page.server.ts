@@ -18,6 +18,8 @@ function stripCidr(ip: string | null | undefined): string | null {
 	const raw = ip.split('/')[0].trim().toLowerCase();
 	// Ignore DHCP placeholders and obviously non-IP values
 	if (!raw || raw === 'dhcp' || raw === 'dhcp6' || raw === 'auto') return null;
+	// Must look like an IP (contains dots or colons for IPv6)
+	if (!raw.includes('.') && !raw.includes(':')) return null;
 	return raw || null;
 }
 
@@ -40,15 +42,35 @@ async function getQemuIp(host: string, tokenId: string, tokenSecret: string, nod
 	}
 }
 
-// Get IP for an LXC container — top-level ip field first, then parse net0 from config
+// Get IP for an LXC container.
+// Priority:
+//   1. /lxc/{vmid}/interfaces  — live kernel data, returns actual DHCP-assigned IP
+//   2. top-level ip field from the status list (may be "dhcp" placeholder)
+//   3. net0 from /lxc/{vmid}/config (also may be "dhcp" placeholder)
 async function getLxcIp(host: string, tokenId: string, tokenSecret: string, node: string, g: any): Promise<string | null> {
-	// Top-level ip field (some PVE versions, usually CIDR format)
+	// 1. Query the live interfaces endpoint — this is the only reliable source for DHCP leases
+	try {
+		const ifaces: any[] = await pveGet(host, tokenId, tokenSecret, `/nodes/${node}/lxc/${g.vmid}/interfaces`);
+		if (Array.isArray(ifaces)) {
+			for (const iface of ifaces) {
+				if (iface.name === 'lo') continue;
+				// The interfaces endpoint returns inet/inet6 entries
+				const ip = iface.inet ?? iface['ip-address'] ?? null;
+				const stripped = stripCidr(ip);
+				if (stripped) return stripped;
+			}
+		}
+	} catch {
+		// Not available on older PVE versions or insufficient permissions — fall through
+	}
+
+	// 2. Top-level ip field from the status list (some PVE versions, usually CIDR format)
 	if (g.ip) {
 		const stripped = stripCidr(g.ip);
 		if (stripped) return stripped;
 	}
 
-	// Fall back to reading config net0 field
+	// 3. Fall back to reading config net0 field
 	try {
 		const config = await pveGet(host, tokenId, tokenSecret, `/nodes/${node}/lxc/${g.vmid}/config`);
 		const net0: string = config?.net0 ?? '';
