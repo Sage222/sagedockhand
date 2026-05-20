@@ -16,9 +16,7 @@ async function pveGet(host: string, tokenId: string, tokenSecret: string, path: 
 function stripCidr(ip: string | null | undefined): string | null {
 	if (!ip) return null;
 	const raw = ip.split('/')[0].trim().toLowerCase();
-	// Ignore DHCP placeholders and obviously non-IP values
 	if (!raw || raw === 'dhcp' || raw === 'dhcp6' || raw === 'auto') return null;
-	// Must look like an IP (contains dots or colons for IPv6)
 	if (!raw.includes('.') && !raw.includes(':')) return null;
 	return raw || null;
 }
@@ -54,7 +52,6 @@ async function getLxcIp(host: string, tokenId: string, tokenSecret: string, node
 		if (Array.isArray(ifaces)) {
 			for (const iface of ifaces) {
 				if (iface.name === 'lo') continue;
-				// The interfaces endpoint returns inet/inet6 entries
 				const ip = iface.inet ?? iface['ip-address'] ?? null;
 				const stripped = stripCidr(ip);
 				if (stripped) return stripped;
@@ -64,7 +61,7 @@ async function getLxcIp(host: string, tokenId: string, tokenSecret: string, node
 		// Not available on older PVE versions or insufficient permissions — fall through
 	}
 
-	// 2. Top-level ip field from the status list (some PVE versions, usually CIDR format)
+	// 2. Top-level ip field from the status list
 	if (g.ip) {
 		const stripped = stripCidr(g.ip);
 		if (stripped) return stripped;
@@ -74,8 +71,6 @@ async function getLxcIp(host: string, tokenId: string, tokenSecret: string, node
 	try {
 		const config = await pveGet(host, tokenId, tokenSecret, `/nodes/${node}/lxc/${g.vmid}/config`);
 		const net0: string = config?.net0 ?? '';
-		// net0 looks like: "name=eth0,bridge=vmbr0,ip=10.0.0.205/24,..."
-		// ip= may also be "dhcp" or "dhcp6" — stripCidr handles those
 		const match = net0.match(/(?:^|,)ip=([^,]+)/);
 		if (match) return stripCidr(match[1]);
 	} catch {
@@ -89,7 +84,6 @@ let cache: { ts: number; result: any } | null = null;
 const CACHE_TTL_MS = 30_000;
 
 export const load: PageServerLoad = async ({ cookies, depends }) => {
-	// Register a dependency key so manual invalidateAll() still triggers a real fetch
 	depends('proxmox:data');
 
 	const auth = await authorize(cookies);
@@ -97,7 +91,6 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 		return { error: 'Authentication required', data: null, rrd: null, hasManageToken: false };
 	}
 
-	// Return cached result if it's still fresh
 	if (cache && Date.now() - cache.ts < CACHE_TTL_MS) {
 		return cache.result;
 	}
@@ -112,7 +105,15 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 			getSetting('proxmox_manage_token_secret')
 		]);
 
-		if (!host || !tokenId || !tokenSecret) {
+		if (!host) {
+			return { notConfigured: true, data: null, rrd: null, hasManageToken: false };
+		}
+
+		// Use whichever token is available — manage token covers everything read token does
+		const effectiveTokenId = tokenId || manageTokenId;
+		const effectiveTokenSecret = tokenSecret || manageTokenSecret;
+
+		if (!effectiveTokenId || !effectiveTokenSecret) {
 			return { notConfigured: true, data: null, rrd: null, hasManageToken: false };
 		}
 
@@ -120,10 +121,10 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 		const hasManageToken = !!(manageTokenId && manageTokenSecret);
 
 		const [nodeStatus, vms, lxcs, rrdRaw] = await Promise.allSettled([
-			pveGet(host, tokenId, tokenSecret, `/nodes/${nodeName}/status`),
-			pveGet(host, tokenId, tokenSecret, `/nodes/${nodeName}/qemu`),
-			pveGet(host, tokenId, tokenSecret, `/nodes/${nodeName}/lxc`),
-			pveGet(host, tokenId, tokenSecret, `/nodes/${nodeName}/rrddata?timeframe=hour&cf=AVERAGE`)
+			pveGet(host, effectiveTokenId, effectiveTokenSecret, `/nodes/${nodeName}/status`),
+			pveGet(host, effectiveTokenId, effectiveTokenSecret, `/nodes/${nodeName}/qemu`),
+			pveGet(host, effectiveTokenId, effectiveTokenSecret, `/nodes/${nodeName}/lxc`),
+			pveGet(host, effectiveTokenId, effectiveTokenSecret, `/nodes/${nodeName}/rrddata?timeframe=hour&cf=AVERAGE`)
 		]);
 
 		if (nodeStatus.status === 'rejected') throw new Error(nodeStatus.reason?.message ?? 'Failed to fetch node status');
@@ -137,19 +138,17 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 		const running = allGuests.filter((g: any) => g.status === 'running');
 		const stopped = allGuests.filter((g: any) => g.status === 'stopped');
 
-		// Fetch IPs for all guests in parallel
 		const guestIps: Record<number, string | null> = {};
 		await Promise.all(allGuests.map(async (g: any) => {
 			if (g.status !== 'running') { guestIps[g.vmid] = null; return; }
 			const isLxc = !!lxcsData.find((l: any) => l.vmid === g.vmid);
 			if (isLxc) {
-				guestIps[g.vmid] = await getLxcIp(host, tokenId, tokenSecret, nodeName, g);
+				guestIps[g.vmid] = await getLxcIp(host, effectiveTokenId, effectiveTokenSecret, nodeName, g);
 			} else {
-				guestIps[g.vmid] = await getQemuIp(host, tokenId, tokenSecret, nodeName, g.vmid);
+				guestIps[g.vmid] = await getQemuIp(host, effectiveTokenId, effectiveTokenSecret, nodeName, g.vmid);
 			}
 		}));
 
-		// Build RRD points — last 60 mins
 		const memTotal = ns.memory?.total ?? 0;
 		const rrdPoints = rrdData.map((p: any) => {
 			const memUsed = p.memory ?? p.memused ?? null;
@@ -194,13 +193,11 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 			rrd: rrdPoints
 		};
 
-		// Store in cache
 		cache = { ts: Date.now(), result };
 		return result;
 
 	} catch (err: any) {
 		console.error('Proxmox page load error:', err);
-		// On error, return stale cache if available rather than showing an error
 		if (cache) return cache.result;
 		return { error: err.message ?? 'Failed to connect to Proxmox', data: null, rrd: null, hasManageToken: false };
 	}

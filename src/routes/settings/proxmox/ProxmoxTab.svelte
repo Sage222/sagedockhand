@@ -6,8 +6,6 @@
 	let tokenId = $state('');
 	let tokenSecret = $state('');
 	let node = $state('pve');
-	let manageTokenId = $state('');
-	let manageTokenSecret = $state('');
 
 	let saving = $state(false);
 	let testing = $state(false);
@@ -21,11 +19,10 @@
 			if (res.ok) {
 				const data = await res.json();
 				host = data.host ?? '';
-				tokenId = data.tokenId ?? '';
-				tokenSecret = data.tokenSecret ?? '';
+				// Prefer manage token if that's all that's set
+				tokenId = data.manageTokenId || data.tokenId || '';
+				tokenSecret = data.manageTokenSecret || data.tokenSecret || '';
 				node = data.node ?? 'pve';
-				manageTokenId = data.manageTokenId ?? '';
-				manageTokenSecret = data.manageTokenSecret ?? '';
 			}
 		} catch {}
 	});
@@ -33,10 +30,18 @@
 	async function save() {
 		saving = true; saveStatus = 'idle';
 		try {
+			// Save into both token slots so existing code paths keep working
 			const res = await fetch('/api/settings/proxmox', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ host, tokenId, tokenSecret, node, manageTokenId, manageTokenSecret })
+				body: JSON.stringify({
+					host,
+					tokenId,
+					tokenSecret,
+					node,
+					manageTokenId: tokenId,
+					manageTokenSecret: tokenSecret
+				})
 			});
 			saveStatus = res.ok ? 'saved' : 'error';
 			setTimeout(() => { saveStatus = 'idle'; }, 2500);
@@ -61,7 +66,13 @@
 	</div>
 
 	<div class="rounded-lg border bg-card p-5 space-y-5">
-		<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Read-only token (monitoring)</p>
+		<div>
+			<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">API Token</p>
+			<p class="text-xs text-muted-foreground mt-1">
+				Create a token in PVE with <code class="font-mono">VM.Audit</code> for monitoring only, or add
+				<code class="font-mono">VM.PowerMgmt</code> as well to enable power controls (start / stop / restart).
+			</p>
+		</div>
 
 		<div class="space-y-1.5">
 			<label for="pve-host" class="text-sm font-medium">Host URL</label>
@@ -88,25 +99,6 @@
 			<input id="pve-node" bind:value={node} placeholder="pve"
 				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
 			<p class="text-xs text-muted-foreground">Node name as shown in PVE (default: <code class="font-mono">pve</code>)</p>
-		</div>
-	</div>
-
-	<div class="rounded-lg border bg-card p-5 space-y-5">
-		<div>
-			<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Manage token (VM start / stop / restart)</p>
-			<p class="text-xs text-muted-foreground mt-1">Optional. Create a separate token in PVE with <code class="font-mono">VM.PowerMgmt</code> permission (and <code class="font-mono">VM.Audit</code>). Leave blank to disable power controls.</p>
-		</div>
-
-		<div class="space-y-1.5">
-			<label for="pve-manage-token-id" class="text-sm font-medium">Manage Token ID</label>
-			<input id="pve-manage-token-id" bind:value={manageTokenId} placeholder="root@pam!dockhand-manage"
-				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
-		</div>
-
-		<div class="space-y-1.5">
-			<label for="pve-manage-token-secret" class="text-sm font-medium">Manage Token Secret</label>
-			<input id="pve-manage-token-secret" type="password" bind:value={manageTokenSecret} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
 		</div>
 	</div>
 
