@@ -17,10 +17,9 @@
 	let actionError = $state<Record<number, string>>({});
 	let interval: ReturnType<typeof setInterval>;
 
-	type Guest = { vmid: number; name: string; status: string; type: string; cpu: number; mem: number; maxmem: number; };
+	type Guest = { vmid: number; name: string; status: string; type: string; cpu: number; mem: number; maxmem: number; uptime: number | null; ip: string | null; };
 	type RrdPoint = { t: number; cpu: number | null; netin: number | null; netout: number | null; mem: number | null; };
 
-	// Derive rrd reactively so Svelte re-renders sparklines after invalidateAll()
 	let rrd = $derived((data.rrd ?? []) as RrdPoint[]);
 
 	function fmt(bytes: number) {
@@ -58,10 +57,15 @@
 		return points
 			.map((v, i) => {
 				if (v === null || !isFinite(v)) return null;
-				return `${(i * step).toFixed(1)},${(h - (v / max) * (h - 4) - 2).toFixed(1)}`;
+				return `${(i * step).toFixed(1)},${(h - (v / max) * (h - 6) - 3).toFixed(1)}`;
 			})
 			.filter(Boolean)
 			.join(' ');
+	}
+
+	function seriesMax(points: (number | null)[]): number | null {
+		const valid = points.filter((v): v is number => v !== null && isFinite(v));
+		return valid.length ? Math.max(...valid) : null;
 	}
 
 	function lastVal(points: (number | null)[]): number | null {
@@ -163,7 +167,7 @@
 			</div>
 		</div>
 
-		<!-- Graphs row — all driven by reactive $derived rrd -->
+		<!-- Graphs row -->
 		{#if rrd.length > 2}
 			{@const netinSeries = rrd.map(p => p.netin)}
 			{@const netoutSeries = rrd.map(p => p.netout)}
@@ -173,6 +177,9 @@
 			{@const netoutLast = lastVal(netoutSeries)}
 			{@const cpuLast = lastVal(cpuSeries)}
 			{@const memLast = lastVal(memSeries)}
+			{@const cpuMax = seriesMax(cpuSeries)}
+			{@const memMax = seriesMax(memSeries)}
+			{@const netMax = seriesMax([...netinSeries, ...netoutSeries])}
 
 			<div class="grid grid-cols-1 md:grid-cols-3 gap-3">
 				<!-- Network graph -->
@@ -184,13 +191,17 @@
 							{#if netoutLast !== null}<span class="text-orange-400">↓ {fmtBps(netoutLast)}</span>{/if}
 						</div>
 					</div>
-					<svg viewBox="0 0 200 40" class="w-full" preserveAspectRatio="none" style="height:48px">
+					<svg viewBox="0 0 200 44" class="w-full" preserveAspectRatio="none" style="height:52px">
 						{#if sparkline(netinSeries)}
 							<polyline points={sparkline(netinSeries)} fill="none" stroke="#3b82f6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" />
 						{/if}
 						{#if sparkline(netoutSeries)}
 							<polyline points={sparkline(netoutSeries)} fill="none" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" />
 						{/if}
+						{#if netMax !== null}
+							<text x="2" y="8" font-size="6" fill="currentColor" opacity="0.4">{fmtBps(netMax)}</text>
+						{/if}
+						<text x="2" y="42" font-size="6" fill="currentColor" opacity="0.4">0</text>
 					</svg>
 				</div>
 
@@ -202,10 +213,14 @@
 							<span class="text-xs tabular-nums {cpuLast > 0.9 ? 'text-destructive' : cpuLast > 0.7 ? 'text-yellow-500' : 'text-muted-foreground'}">{(cpuLast * 100).toFixed(1)}%</span>
 						{/if}
 					</div>
-					<svg viewBox="0 0 200 40" class="w-full" preserveAspectRatio="none" style="height:48px">
+					<svg viewBox="0 0 200 44" class="w-full" preserveAspectRatio="none" style="height:52px">
 						{#if sparkline(cpuSeries)}
 							<polyline points={sparkline(cpuSeries)} fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
 						{/if}
+						{#if cpuMax !== null}
+							<text x="2" y="8" font-size="6" fill="currentColor" opacity="0.4">{(cpuMax * 100).toFixed(0)}%</text>
+						{/if}
+						<text x="2" y="42" font-size="6" fill="currentColor" opacity="0.4">0%</text>
 					</svg>
 				</div>
 
@@ -217,10 +232,14 @@
 							<span class="text-xs tabular-nums {memLast > 0.9 ? 'text-destructive' : memLast > 0.7 ? 'text-yellow-500' : 'text-muted-foreground'}">{(memLast * 100).toFixed(1)}%</span>
 						{/if}
 					</div>
-					<svg viewBox="0 0 200 40" class="w-full" preserveAspectRatio="none" style="height:48px">
+					<svg viewBox="0 0 200 44" class="w-full" preserveAspectRatio="none" style="height:52px">
 						{#if sparkline(memSeries)}
 							<polyline points={sparkline(memSeries)} fill="none" stroke="#34d399" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
 						{/if}
+						{#if memMax !== null}
+							<text x="2" y="8" font-size="6" fill="currentColor" opacity="0.4">{(memMax * 100).toFixed(0)}%</text>
+						{/if}
+						<text x="2" y="42" font-size="6" fill="currentColor" opacity="0.4">0%</text>
 					</svg>
 				</div>
 			</div>
@@ -238,6 +257,8 @@
 							<th class="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Name</th>
 							<th class="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Type</th>
 							<th class="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Status</th>
+							<th class="text-left px-3 py-2 text-xs font-medium text-muted-foreground">IP</th>
+							<th class="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Uptime</th>
 							<th class="text-right px-3 py-2 text-xs font-medium text-muted-foreground">CPU</th>
 							<th class="text-right px-3 py-2 text-xs font-medium text-muted-foreground">Memory</th>
 							{#if data.hasManageToken}<th class="text-right px-3 py-2 text-xs font-medium text-muted-foreground">Actions</th>{/if}
@@ -264,37 +285,19 @@
 										<span class="inline-flex items-center gap-1 text-xs text-muted-foreground"><Square class="w-3 h-3" />{g.status}</span>
 									{/if}
 								</td>
+								<td class="px-3 py-2 text-xs text-muted-foreground font-mono">{g.ip ?? '—'}</td>
+								<td class="px-3 py-2 text-xs text-muted-foreground tabular-nums">{g.status === 'running' && g.uptime ? fmtUptime(g.uptime) : '—'}</td>
 								<td class="px-3 py-2 text-right tabular-nums text-xs">{g.status === 'running' ? (g.cpu * 100).toFixed(1) + '%' : '—'}</td>
 								<td class="px-3 py-2 text-right tabular-nums text-xs">{g.status === 'running' && g.maxmem > 0 ? fmt(g.mem) + ' / ' + fmt(g.maxmem) : '—'}</td>
 								{#if data.hasManageToken}
 									<td class="px-3 py-2">
 										<div class="flex items-center justify-end gap-1">
 											{#if g.status === 'running'}
-												<button
-													onclick={() => doAction(g.vmid, g.type, 'shutdown')}
-													disabled={actionStatus[g.vmid] === 'loading'}
-													title="Shutdown (graceful)"
-													class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground disabled:opacity-40"
-												><StopCircle class="w-3.5 h-3.5" /></button>
-												<button
-													onclick={() => doAction(g.vmid, g.type, 'stop')}
-													disabled={actionStatus[g.vmid] === 'loading'}
-													title="Stop (force off)"
-													class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-destructive disabled:opacity-40"
-												><Power class="w-3.5 h-3.5" /></button>
-												<button
-													onclick={() => doAction(g.vmid, g.type, g.type === 'lxc' ? 'reboot' : 'reset')}
-													disabled={actionStatus[g.vmid] === 'loading'}
-													title="Restart"
-													class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-yellow-500 disabled:opacity-40"
-												><RotateCcw class="w-3.5 h-3.5" /></button>
+												<button onclick={() => doAction(g.vmid, g.type, 'shutdown')} disabled={actionStatus[g.vmid] === 'loading'} title="Shutdown (graceful)" class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground disabled:opacity-40"><StopCircle class="w-3.5 h-3.5" /></button>
+												<button onclick={() => doAction(g.vmid, g.type, 'stop')} disabled={actionStatus[g.vmid] === 'loading'} title="Stop (force off)" class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-destructive disabled:opacity-40"><Power class="w-3.5 h-3.5" /></button>
+												<button onclick={() => doAction(g.vmid, g.type, g.type === 'lxc' ? 'reboot' : 'reset')} disabled={actionStatus[g.vmid] === 'loading'} title="Restart" class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-yellow-500 disabled:opacity-40"><RotateCcw class="w-3.5 h-3.5" /></button>
 											{:else if g.status === 'stopped'}
-												<button
-													onclick={() => doAction(g.vmid, g.type, 'start')}
-													disabled={actionStatus[g.vmid] === 'loading'}
-													title="Start"
-													class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-green-500 disabled:opacity-40"
-												><Zap class="w-3.5 h-3.5" /></button>
+												<button onclick={() => doAction(g.vmid, g.type, 'start')} disabled={actionStatus[g.vmid] === 'loading'} title="Start" class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-green-500 disabled:opacity-40"><Zap class="w-3.5 h-3.5" /></button>
 											{/if}
 										</div>
 									</td>

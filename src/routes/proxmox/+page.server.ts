@@ -11,6 +11,25 @@ async function pveGet(host: string, tokenId: string, tokenSecret: string, path: 
 	return body.data;
 }
 
+// Fetch QEMU guest agent IPs — returns first non-loopback IPv4, or null
+async function getVmIp(host: string, tokenId: string, tokenSecret: string, node: string, vmid: number): Promise<string | null> {
+	try {
+		const ifaces = await pveGet(host, tokenId, tokenSecret, `/nodes/${node}/qemu/${vmid}/agent/network-get-interfaces`);
+		const results: any[] = ifaces?.result ?? [];
+		for (const iface of results) {
+			if (iface.name === 'lo') continue;
+			for (const addr of (iface['ip-addresses'] ?? [])) {
+				if (addr['ip-address-type'] === 'ipv4' && !addr['ip-address'].startsWith('127.')) {
+					return addr['ip-address'];
+				}
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
 export const load: PageServerLoad = async ({ cookies }) => {
 	const auth = await authorize(cookies);
 	if (auth.authEnabled && !auth.isAuthenticated) {
@@ -48,20 +67,35 @@ export const load: PageServerLoad = async ({ cookies }) => {
 		const rrdData = rrdRaw.status === 'fulfilled' ? (rrdRaw.value ?? []) : [];
 
 		const allGuests = [...vmsData, ...lxcsData];
-		const running = allGuests.filter((g: any) => g.status === 'running').length;
-		const stopped = allGuests.filter((g: any) => g.status === 'stopped').length;
+		const running = allGuests.filter((g: any) => g.status === 'running');
+		const stopped = allGuests.filter((g: any) => g.status === 'stopped');
+
+		// Fetch IPs for running guests in parallel
+		const guestIps: Record<number, string | null> = {};
+		await Promise.all(allGuests.map(async (g: any) => {
+			if (g.status !== 'running') { guestIps[g.vmid] = null; return; }
+			const isLxc = !!lxcsData.find((l: any) => l.vmid === g.vmid);
+			if (isLxc) {
+				guestIps[g.vmid] = g.ip ?? null;
+			} else {
+				guestIps[g.vmid] = await getVmIp(host, tokenId, tokenSecret, nodeName, g.vmid);
+			}
+		}));
 
 		// Build RRD points — last 60 mins
-		const rrdPoints = rrdData.map((p: any) => ({
-			t: p.time,
-			cpu: p.cpu ?? null,
-			netin: p.netin ?? null,
-			netout: p.netout ?? null,
-			// memory as a 0-1 ratio using memused/maxmem from RRD
-			mem: (p.memused != null && p.maxmem != null && p.maxmem > 0)
-				? p.memused / p.maxmem
-				: null
-		}));
+		// PVE node RRD field names vary slightly across versions; try all known variants
+		const memTotal = ns.memory?.total ?? 0;
+		const rrdPoints = rrdData.map((p: any) => {
+			const memUsed = p.memory ?? p.memused ?? null;
+			const memMax  = p.memtotal ?? p.maxmem ?? (memTotal > 0 ? memTotal : null);
+			return {
+				t: p.time,
+				cpu: p.cpu ?? null,
+				netin: p.netin ?? null,
+				netout: p.netout ?? null,
+				mem: (memUsed != null && memMax != null && memMax > 0) ? memUsed / memMax : null
+			};
+		});
 
 		return {
 			notConfigured: false,
@@ -76,8 +110,8 @@ export const load: PageServerLoad = async ({ cookies }) => {
 				rootFsUsed: ns.rootfs?.used ?? 0,
 				rootFsTotal: ns.rootfs?.total ?? 0,
 				uptime: ns.uptime ?? 0,
-				vmsRunning: running,
-				vmsStopped: stopped,
+				vmsRunning: running.length,
+				vmsStopped: stopped.length,
 				vmsTotal: allGuests.length,
 				guests: allGuests.map((g: any) => ({
 					vmid: g.vmid,
@@ -86,7 +120,9 @@ export const load: PageServerLoad = async ({ cookies }) => {
 					type: vmsData.find((v: any) => v.vmid === g.vmid) ? 'qemu' : 'lxc',
 					cpu: g.cpu ?? 0,
 					mem: g.mem ?? 0,
-					maxmem: g.maxmem ?? 0
+					maxmem: g.maxmem ?? 0,
+					uptime: g.uptime ?? null,
+					ip: guestIps[g.vmid] ?? null
 				}))
 			},
 			rrd: rrdPoints
