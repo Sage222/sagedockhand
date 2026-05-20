@@ -13,12 +13,15 @@
 	let { data } = $props();
 
 	let refreshing = $state(false);
-	let actionStatus = $state<Record<number, string>>({}); // vmid -> 'loading'|'ok'|'error'
+	let actionStatus = $state<Record<number, string>>({});
 	let actionError = $state<Record<number, string>>({});
 	let interval: ReturnType<typeof setInterval>;
 
 	type Guest = { vmid: number; name: string; status: string; type: string; cpu: number; mem: number; maxmem: number; };
-	type RrdPoint = { t: number; cpu: number | null; netin: number | null; netout: number | null; cpuPsi: number | null; memPsi: number | null; };
+	type RrdPoint = { t: number; cpu: number | null; netin: number | null; netout: number | null; mem: number | null; };
+
+	// Derive rrd reactively so Svelte re-renders sparklines after invalidateAll()
+	let rrd = $derived((data.rrd ?? []) as RrdPoint[]);
 
 	function fmt(bytes: number) {
 		if (bytes > 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
@@ -47,7 +50,6 @@
 		return 'bg-primary';
 	}
 
-	// SVG sparkline — returns a polyline points string
 	function sparkline(points: (number | null)[], w = 200, h = 40): string {
 		const valid = points.filter((v): v is number => v !== null && isFinite(v));
 		if (valid.length < 2) return '';
@@ -55,9 +57,8 @@
 		const step = w / (points.length - 1);
 		return points
 			.map((v, i) => {
-				const val = v !== null && isFinite(v) ? v : null;
-				if (val === null) return null;
-				return `${(i * step).toFixed(1)},${(h - (val / max) * (h - 4) - 2).toFixed(1)}`;
+				if (v === null || !isFinite(v)) return null;
+				return `${(i * step).toFixed(1)},${(h - (v / max) * (h - 4) - 2).toFixed(1)}`;
 			})
 			.filter(Boolean)
 			.join(' ');
@@ -68,11 +69,6 @@
 			if (points[i] !== null && isFinite(points[i] as number)) return points[i];
 		}
 		return null;
-	}
-
-	// Returns true if every value in the series is null (PSI not reported by kernel)
-	function allNull(points: (number | null)[]): boolean {
-		return points.every(v => v === null || !isFinite(v as number));
 	}
 
 	async function refresh() {
@@ -101,17 +97,6 @@
 
 	onMount(() => { interval = setInterval(refresh, 15000); });
 	onDestroy(() => clearInterval(interval));
-
-	// Derived RRD series
-	$effect(() => {
-		// reactive reference to data.rrd so effect re-runs on navigation
-		void data.rrd;
-	});
-
-	function rrdSeries(key: keyof typeof data.rrd[0]) {
-		if (!data.rrd) return [];
-		return data.rrd.map((p: RrdPoint) => (p as any)[key] as number | null);
-	}
 </script>
 
 <div class="flex flex-col gap-4 p-4 max-w-5xl">
@@ -178,26 +163,23 @@
 			</div>
 		</div>
 
-		<!-- Graphs row -->
-		{#if data.rrd && data.rrd.length > 2}
-			{@const netinSeries = rrdSeries('netin')}
-			{@const netoutSeries = rrdSeries('netout')}
-			{@const cpuPsiSeries = rrdSeries('cpuPsi')}
-			{@const memPsiSeries = rrdSeries('memPsi')}
-			{@const cpuSeries = rrdSeries('cpu')}
+		<!-- Graphs row — all driven by reactive $derived rrd -->
+		{#if rrd.length > 2}
+			{@const netinSeries = rrd.map(p => p.netin)}
+			{@const netoutSeries = rrd.map(p => p.netout)}
+			{@const cpuSeries = rrd.map(p => p.cpu)}
+			{@const memSeries = rrd.map(p => p.mem)}
 			{@const netinLast = lastVal(netinSeries)}
 			{@const netoutLast = lastVal(netoutSeries)}
-			{@const cpuPsiLast = lastVal(cpuPsiSeries)}
-			{@const memPsiLast = lastVal(memPsiSeries)}
-			{@const cpuPsiUnavailable = allNull(cpuPsiSeries)}
-			{@const memPsiUnavailable = allNull(memPsiSeries)}
+			{@const cpuLast = lastVal(cpuSeries)}
+			{@const memLast = lastVal(memSeries)}
 
 			<div class="grid grid-cols-1 md:grid-cols-3 gap-3">
 				<!-- Network graph -->
-				<div class="rounded-lg border bg-card p-3 space-y-1 md:col-span-1">
+				<div class="rounded-lg border bg-card p-3 space-y-1">
 					<div class="flex items-center justify-between">
 						<span class="text-xs font-medium text-muted-foreground">Network I/O (1h)</span>
-						<div class="flex gap-3 text-xs text-muted-foreground">
+						<div class="flex gap-3 text-xs">
 							{#if netinLast !== null}<span class="text-blue-500">↑ {fmtBps(netinLast)}</span>{/if}
 							{#if netoutLast !== null}<span class="text-orange-400">↓ {fmtBps(netoutLast)}</span>{/if}
 						</div>
@@ -212,46 +194,34 @@
 					</svg>
 				</div>
 
-				<!-- CPU Pressure Stall -->
+				<!-- CPU over time -->
 				<div class="rounded-lg border bg-card p-3 space-y-1">
 					<div class="flex items-center justify-between">
-						<span class="text-xs font-medium text-muted-foreground">CPU Pressure (1h)</span>
-						{#if cpuPsiUnavailable}
-							<span class="text-xs text-muted-foreground">n/a</span>
-						{:else if cpuPsiLast !== null}
-							<span class="text-xs tabular-nums {cpuPsiLast > 20 ? 'text-destructive' : cpuPsiLast > 5 ? 'text-yellow-500' : 'text-muted-foreground'}">{cpuPsiLast.toFixed(1)}%</span>
-						{:else}
-							<span class="text-xs text-muted-foreground">n/a</span>
+						<span class="text-xs font-medium text-muted-foreground">CPU Usage (1h)</span>
+						{#if cpuLast !== null}
+							<span class="text-xs tabular-nums {cpuLast > 0.9 ? 'text-destructive' : cpuLast > 0.7 ? 'text-yellow-500' : 'text-muted-foreground'}">{(cpuLast * 100).toFixed(1)}%</span>
 						{/if}
 					</div>
-					{#if !cpuPsiUnavailable && cpuPsiLast !== null && sparkline(cpuPsiSeries)}
-						<svg viewBox="0 0 200 40" class="w-full" preserveAspectRatio="none" style="height:48px">
-							<polyline points={sparkline(cpuPsiSeries)} fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
-						</svg>
-					{:else}
-						<div class="flex items-center justify-center h-12 text-xs text-muted-foreground italic">PSI not enabled on this node</div>
-					{/if}
+					<svg viewBox="0 0 200 40" class="w-full" preserveAspectRatio="none" style="height:48px">
+						{#if sparkline(cpuSeries)}
+							<polyline points={sparkline(cpuSeries)} fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
+						{/if}
+					</svg>
 				</div>
 
-				<!-- Memory Pressure Stall -->
+				<!-- Memory over time -->
 				<div class="rounded-lg border bg-card p-3 space-y-1">
 					<div class="flex items-center justify-between">
-						<span class="text-xs font-medium text-muted-foreground">Memory Pressure (1h)</span>
-						{#if memPsiUnavailable}
-							<span class="text-xs text-muted-foreground">n/a</span>
-						{:else if memPsiLast !== null}
-							<span class="text-xs tabular-nums {memPsiLast > 10 ? 'text-destructive' : memPsiLast > 2 ? 'text-yellow-500' : 'text-muted-foreground'}">{memPsiLast.toFixed(1)}%</span>
-						{:else}
-							<span class="text-xs text-muted-foreground">n/a</span>
+						<span class="text-xs font-medium text-muted-foreground">Memory Usage (1h)</span>
+						{#if memLast !== null}
+							<span class="text-xs tabular-nums {memLast > 0.9 ? 'text-destructive' : memLast > 0.7 ? 'text-yellow-500' : 'text-muted-foreground'}">{(memLast * 100).toFixed(1)}%</span>
 						{/if}
 					</div>
-					{#if !memPsiUnavailable && memPsiLast !== null && sparkline(memPsiSeries)}
-						<svg viewBox="0 0 200 40" class="w-full" preserveAspectRatio="none" style="height:48px">
-							<polyline points={sparkline(memPsiSeries)} fill="none" stroke="#34d399" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
-						</svg>
-					{:else}
-						<div class="flex items-center justify-center h-12 text-xs text-muted-foreground italic">PSI not enabled on this node</div>
-					{/if}
+					<svg viewBox="0 0 200 40" class="w-full" preserveAspectRatio="none" style="height:48px">
+						{#if sparkline(memSeries)}
+							<polyline points={sparkline(memSeries)} fill="none" stroke="#34d399" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
+						{/if}
+					</svg>
 				</div>
 			</div>
 		{/if}
@@ -300,43 +270,31 @@
 									<td class="px-3 py-2">
 										<div class="flex items-center justify-end gap-1">
 											{#if g.status === 'running'}
-												<!-- Shutdown (graceful) -->
 												<button
 													onclick={() => doAction(g.vmid, g.type, 'shutdown')}
 													disabled={actionStatus[g.vmid] === 'loading'}
 													title="Shutdown (graceful)"
 													class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground disabled:opacity-40"
-												>
-													<StopCircle class="w-3.5 h-3.5" />
-												</button>
-												<!-- Stop (force) -->
+												><StopCircle class="w-3.5 h-3.5" /></button>
 												<button
 													onclick={() => doAction(g.vmid, g.type, 'stop')}
 													disabled={actionStatus[g.vmid] === 'loading'}
 													title="Stop (force off)"
 													class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-destructive disabled:opacity-40"
-												>
-													<Power class="w-3.5 h-3.5" />
-												</button>
-												<!-- Restart -->
+												><Power class="w-3.5 h-3.5" /></button>
 												<button
 													onclick={() => doAction(g.vmid, g.type, g.type === 'lxc' ? 'reboot' : 'reset')}
 													disabled={actionStatus[g.vmid] === 'loading'}
 													title="Restart"
 													class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-yellow-500 disabled:opacity-40"
-												>
-													<RotateCcw class="w-3.5 h-3.5" />
-												</button>
+												><RotateCcw class="w-3.5 h-3.5" /></button>
 											{:else if g.status === 'stopped'}
-												<!-- Start -->
 												<button
 													onclick={() => doAction(g.vmid, g.type, 'start')}
 													disabled={actionStatus[g.vmid] === 'loading'}
 													title="Start"
 													class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-green-500 disabled:opacity-40"
-												>
-													<Zap class="w-3.5 h-3.5" />
-												</button>
+												><Zap class="w-3.5 h-3.5" /></button>
 											{/if}
 										</div>
 									</td>

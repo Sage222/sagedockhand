@@ -57,8 +57,10 @@ export const load: PageServerLoad = async ({ cookies }) => {
 			cpu: p.cpu ?? null,
 			netin: p.netin ?? null,
 			netout: p.netout ?? null,
-			cpuPsi: p.cpu_psi_avg10 ?? null,
-			memPsi: p.mem_psi_avg10 ?? null
+			// memory as a 0-1 ratio using memused/maxmem from RRD
+			mem: (p.memused != null && p.maxmem != null && p.maxmem > 0)
+				? p.memused / p.maxmem
+				: null
 		}));
 
 		return {
