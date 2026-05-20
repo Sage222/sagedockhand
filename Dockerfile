@@ -84,7 +84,7 @@ RUN MAKEFLAGS="-j$(nproc)" npm ci --ignore-scripts \
 # NODE_OPTIONS caps heap to avoid OOM on low-RAM hosts (build is killed at gzip reporting otherwise)
 # VITE_REPORTER_GZIP=false skips the gzip size pass which is the peak memory moment
 COPY . .
-RUN NODE_OPTIONS="--max-old-space-size=1536" VITE_REPORTER_GZIP=false npm run build
+RUN NODE_OPTIONS="--max-old-space-size=3072" VITE_REPORTER_GZIP=false npm run build
 
 # Production dependencies only
 # Preserve better-sqlite3 native addon (no prebuilds exist for Node 24 ABI 137)
