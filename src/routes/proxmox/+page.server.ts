@@ -12,9 +12,13 @@ async function pveGet(host: string, tokenId: string, tokenSecret: string, path: 
 }
 
 // Strip CIDR suffix from IP e.g. "10.0.0.205/24" -> "10.0.0.205"
+// Returns null if the value is "dhcp", "dhcp6", empty, or not a real IP
 function stripCidr(ip: string | null | undefined): string | null {
 	if (!ip) return null;
-	return ip.split('/')[0].trim() || null;
+	const raw = ip.split('/')[0].trim().toLowerCase();
+	// Ignore DHCP placeholders and obviously non-IP values
+	if (!raw || raw === 'dhcp' || raw === 'dhcp6' || raw === 'auto') return null;
+	return raw || null;
 }
 
 // Get IP for a QEMU VM via guest agent
@@ -39,13 +43,17 @@ async function getQemuIp(host: string, tokenId: string, tokenSecret: string, nod
 // Get IP for an LXC container — top-level ip field first, then parse net0 from config
 async function getLxcIp(host: string, tokenId: string, tokenSecret: string, node: string, g: any): Promise<string | null> {
 	// Top-level ip field (some PVE versions, usually CIDR format)
-	if (g.ip) return stripCidr(g.ip);
+	if (g.ip) {
+		const stripped = stripCidr(g.ip);
+		if (stripped) return stripped;
+	}
 
 	// Fall back to reading config net0 field
 	try {
 		const config = await pveGet(host, tokenId, tokenSecret, `/nodes/${node}/lxc/${g.vmid}/config`);
 		const net0: string = config?.net0 ?? '';
 		// net0 looks like: "name=eth0,bridge=vmbr0,ip=10.0.0.205/24,..."
+		// ip= may also be "dhcp" or "dhcp6" — stripCidr handles those
 		const match = net0.match(/(?:^|,)ip=([^,]+)/);
 		if (match) return stripCidr(match[1]);
 	} catch {

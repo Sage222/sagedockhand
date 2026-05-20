@@ -17,6 +17,11 @@
 	let actionError = $state<Record<number, string>>({});
 	let interval: ReturnType<typeof setInterval>;
 
+	// Countdown timer state
+	const REFRESH_INTERVAL_S = 30;
+	let countdown = $state(REFRESH_INTERVAL_S);
+	let countdownInterval: ReturnType<typeof setInterval>;
+
 	type Guest = { vmid: number; name: string; status: string; type: string; cpu: number; mem: number; maxmem: number; uptime: number | null; ip: string | null; };
 	type RrdPoint = { t: number; cpu: number | null; netin: number | null; netout: number | null; mem: number | null; };
 
@@ -79,8 +84,17 @@
 	// not the entire page, so nav clicks that hit the server cache are instant.
 	async function refresh() {
 		refreshing = true;
+		countdown = REFRESH_INTERVAL_S;
 		await invalidate('proxmox:data');
 		refreshing = false;
+	}
+
+	function resetCountdown() {
+		clearInterval(countdownInterval);
+		countdown = REFRESH_INTERVAL_S;
+		countdownInterval = setInterval(() => {
+			countdown = Math.max(0, countdown - 1);
+		}, 1000);
 	}
 
 	async function doAction(vmid: number, type: string, action: string) {
@@ -101,8 +115,17 @@
 		}
 	}
 
-	onMount(() => { interval = setInterval(refresh, 30_000); });
-	onDestroy(() => clearInterval(interval));
+	onMount(() => {
+		resetCountdown();
+		interval = setInterval(() => {
+			refresh();
+			resetCountdown();
+		}, 30_000);
+	});
+	onDestroy(() => {
+		clearInterval(interval);
+		clearInterval(countdownInterval);
+	});
 </script>
 
 <div class="flex flex-col gap-4 p-4 max-w-5xl">
@@ -247,8 +270,8 @@
 			</div>
 		{/if}
 
-		<!-- Uptime -->
-		<div class="text-xs text-muted-foreground">Node uptime: {fmtUptime(data.data.uptime)} · auto-refreshes every 30s</div>
+		<!-- Uptime + countdown -->
+		<div class="text-xs text-muted-foreground">Node uptime: {fmtUptime(data.data.uptime)} · refreshes in <span class="tabular-nums font-medium">{countdown}s</span></div>
 
 		<!-- Guest table -->
 		{#if data.data.guests.length > 0}
