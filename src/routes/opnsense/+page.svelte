@@ -245,12 +245,11 @@
 						</div>
 					</div>
 					{#if trafficHistory.length >= 2}
+						{@const rxSeries = trafficHistory.map(p => p.rx)}
+						{@const txSeries = trafficHistory.map(p => p.tx)}
+						{@const rxPath = svgTrafficPath(rxSeries, 500, 80)}
+						{@const txPath = svgTrafficPath(txSeries, 500, 80)}
 						<svg class="w-full" viewBox="0 0 500 80" preserveAspectRatio="none">
-							<!-- RX fill -->
-							{@const rxSeries = trafficHistory.map(p => p.rx)}
-							{@const txSeries = trafficHistory.map(p => p.tx)}
-							{@const rxPath = svgTrafficPath(rxSeries, 500, 80)}
-							{@const txPath = svgTrafficPath(txSeries, 500, 80)}
 							{#if rxPath}
 								<path d="{rxPath} L 496,76 L 4,76 Z" fill="rgb(16 185 129 / 0.15)" />
 								<path d="{rxPath}" fill="none" stroke="rgb(16 185 129)" stroke-width="1.5" />
