@@ -1,6 +1,10 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { invalidateAll } from '$app/navigation';
 	import { Server, Cpu, MemoryStick, HardDrive, Play, Square, RefreshCw, AlertCircle, Settings } from 'lucide-svelte';
+
+	let { data } = $props();
+
+	let refreshing = $state(false);
 
 	type Guest = {
 		vmid: number;
@@ -11,28 +15,6 @@
 		mem: number;
 		maxmem: number;
 	};
-
-	type ProxmoxData = {
-		node: string;
-		cpu: number;
-		cpuCores: number;
-		memUsed: number;
-		memTotal: number;
-		rootFsUsed: number;
-		rootFsTotal: number;
-		uptime: number;
-		vmsRunning: number;
-		vmsStopped: number;
-		vmsTotal: number;
-		guests: Guest[];
-		error?: string;
-	};
-
-	let data = $state<ProxmoxData | null>(null);
-	let loading = $state(true);
-	let error = $state<string | null>(null);
-	let notConfigured = $state(false);
-	let interval: ReturnType<typeof setInterval>;
 
 	function fmt(bytes: number) {
 		if (bytes > 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
@@ -59,32 +41,11 @@
 		return 'bg-primary';
 	}
 
-	async function load() {
-		loading = true;
-		error = null;
-		notConfigured = false;
-		try {
-			const res = await fetch('/api/proxmox');
-			const json = await res.json();
-			if (json.error) {
-				if (res.status === 400) notConfigured = true;
-				else error = json.error;
-				data = null;
-			} else {
-				data = json;
-			}
-		} catch (e: any) {
-			error = e.message;
-		} finally {
-			loading = false;
-		}
+	async function refresh() {
+		refreshing = true;
+		await invalidateAll();
+		refreshing = false;
 	}
-
-	onMount(() => {
-		load();
-		interval = setInterval(load, 10000);
-	});
-	onDestroy(() => clearInterval(interval));
 </script>
 
 <div class="flex flex-col gap-4 p-4 max-w-5xl">
@@ -93,8 +54,8 @@
 		<div class="flex items-center gap-2">
 			<Server class="w-5 h-5 text-muted-foreground" />
 			<h1 class="text-xl font-semibold">Proxmox</h1>
-			{#if data}
-				<span class="text-sm text-muted-foreground font-normal">— {data.node}</span>
+			{#if data.data}
+				<span class="text-sm text-muted-foreground font-normal">— {data.data.node}</span>
 			{/if}
 		</div>
 		<div class="flex items-center gap-2">
@@ -103,18 +64,18 @@
 				<span>Settings</span>
 			</a>
 			<button
-				onclick={load}
+				onclick={refresh}
 				class="p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
 				title="Refresh"
 				aria-label="Refresh Proxmox data"
 			>
-				<RefreshCw class="w-4 h-4 {loading ? 'animate-spin' : ''}" />
+				<RefreshCw class="w-4 h-4 {refreshing ? 'animate-spin' : ''}" />
 			</button>
 		</div>
 	</div>
 
-	<!-- Not configured state -->
-	{#if notConfigured}
+	<!-- Not configured -->
+	{#if data.notConfigured}
 		<div class="flex flex-col items-center justify-center gap-4 py-16 text-center">
 			<AlertCircle class="w-10 h-10 text-muted-foreground" />
 			<div>
@@ -127,30 +88,18 @@
 			</a>
 		</div>
 
-	<!-- Error state -->
-	{:else if error}
+	<!-- Error -->
+	{:else if data.error}
 		<div class="rounded-md border border-destructive/30 bg-destructive/5 p-4 flex items-start gap-3">
 			<AlertCircle class="w-4 h-4 text-destructive shrink-0 mt-0.5" />
 			<div>
 				<p class="text-sm font-medium text-destructive">Connection failed</p>
-				<p class="text-xs text-muted-foreground mt-0.5">{error}</p>
+				<p class="text-xs text-muted-foreground mt-0.5">{data.error}</p>
 			</div>
 		</div>
 
-	<!-- Loading (initial) -->
-	{:else if loading && !data}
-		<div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-			{#each Array(4) as _}
-				<div class="rounded-lg border bg-card p-3 space-y-2">
-					<div class="h-3 w-16 rounded bg-muted animate-pulse"></div>
-					<div class="h-7 w-20 rounded bg-muted animate-pulse"></div>
-					<div class="h-2.5 w-24 rounded bg-muted animate-pulse"></div>
-				</div>
-			{/each}
-		</div>
-
 	<!-- Data -->
-	{:else if data}
+	{:else if data.data}
 		<!-- KPI cards -->
 		<div class="grid grid-cols-2 md:grid-cols-4 gap-3">
 			<!-- CPU -->
@@ -159,11 +108,11 @@
 					<Cpu class="w-3.5 h-3.5" />
 					<span>CPU</span>
 				</div>
-				<div class="text-2xl font-semibold tabular-nums">{(data.cpu * 100).toFixed(1)}<span class="text-base font-normal text-muted-foreground">%</span></div>
+				<div class="text-2xl font-semibold tabular-nums">{(data.data.cpu * 100).toFixed(1)}<span class="text-base font-normal text-muted-foreground">%</span></div>
 				<div class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
-					<div class="h-full rounded-full transition-all {pctColor(data.cpu * 100)}" style="width: {Math.min(data.cpu * 100, 100)}%"></div>
+					<div class="h-full rounded-full transition-all {pctColor(data.data.cpu * 100)}" style="width: {Math.min(data.data.cpu * 100, 100)}%"></div>
 				</div>
-				<div class="text-xs text-muted-foreground">{data.cpuCores} cores</div>
+				<div class="text-xs text-muted-foreground">{data.data.cpuCores} cores</div>
 			</div>
 
 			<!-- Memory -->
@@ -172,11 +121,11 @@
 					<MemoryStick class="w-3.5 h-3.5" />
 					<span>Memory</span>
 				</div>
-				<div class="text-2xl font-semibold tabular-nums">{pct(data.memUsed, data.memTotal).toFixed(1)}<span class="text-base font-normal text-muted-foreground">%</span></div>
+				<div class="text-2xl font-semibold tabular-nums">{pct(data.data.memUsed, data.data.memTotal).toFixed(1)}<span class="text-base font-normal text-muted-foreground">%</span></div>
 				<div class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
-					<div class="h-full rounded-full transition-all {pctColor(pct(data.memUsed, data.memTotal))}" style="width: {Math.min(pct(data.memUsed, data.memTotal), 100)}%"></div>
+					<div class="h-full rounded-full transition-all {pctColor(pct(data.data.memUsed, data.data.memTotal))}" style="width: {Math.min(pct(data.data.memUsed, data.data.memTotal), 100)}%"></div>
 				</div>
-				<div class="text-xs text-muted-foreground">{fmt(data.memUsed)} / {fmt(data.memTotal)}</div>
+				<div class="text-xs text-muted-foreground">{fmt(data.data.memUsed)} / {fmt(data.data.memTotal)}</div>
 			</div>
 
 			<!-- Storage -->
@@ -185,11 +134,11 @@
 					<HardDrive class="w-3.5 h-3.5" />
 					<span>Storage</span>
 				</div>
-				<div class="text-2xl font-semibold tabular-nums">{pct(data.rootFsUsed, data.rootFsTotal).toFixed(1)}<span class="text-base font-normal text-muted-foreground">%</span></div>
+				<div class="text-2xl font-semibold tabular-nums">{pct(data.data.rootFsUsed, data.data.rootFsTotal).toFixed(1)}<span class="text-base font-normal text-muted-foreground">%</span></div>
 				<div class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
-					<div class="h-full rounded-full transition-all {pctColor(pct(data.rootFsUsed, data.rootFsTotal))}" style="width: {Math.min(pct(data.rootFsUsed, data.rootFsTotal), 100)}%"></div>
+					<div class="h-full rounded-full transition-all {pctColor(pct(data.data.rootFsUsed, data.data.rootFsTotal))}" style="width: {Math.min(pct(data.data.rootFsUsed, data.data.rootFsTotal), 100)}%"></div>
 				</div>
-				<div class="text-xs text-muted-foreground">{fmt(data.rootFsUsed)} / {fmt(data.rootFsTotal)}</div>
+				<div class="text-xs text-muted-foreground">{fmt(data.data.rootFsUsed)} / {fmt(data.data.rootFsTotal)}</div>
 			</div>
 
 			<!-- Guests -->
@@ -199,22 +148,22 @@
 					<span>Guests</span>
 				</div>
 				<div class="text-2xl font-semibold tabular-nums">
-					{data.vmsRunning}<span class="text-base font-normal text-muted-foreground">/{data.vmsTotal}</span>
+					{data.data.vmsRunning}<span class="text-base font-normal text-muted-foreground">/{data.data.vmsTotal}</span>
 				</div>
 				<div class="flex items-center gap-2">
 					<span class="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400 font-medium">
-						<Play class="w-2.5 h-2.5 fill-current" />{data.vmsRunning} running
+						<Play class="w-2.5 h-2.5 fill-current" />{data.data.vmsRunning} running
 					</span>
 				</div>
-				<div class="text-xs text-muted-foreground">{data.vmsStopped} stopped</div>
+				<div class="text-xs text-muted-foreground">{data.data.vmsStopped} stopped</div>
 			</div>
 		</div>
 
 		<!-- Uptime -->
-		<div class="text-xs text-muted-foreground">Node uptime: {fmtUptime(data.uptime)} · auto-refreshes every 10s</div>
+		<div class="text-xs text-muted-foreground">Node uptime: {fmtUptime(data.data.uptime)}</div>
 
 		<!-- Guest table -->
-		{#if data.guests.length > 0}
+		{#if data.data.guests.length > 0}
 			<div class="rounded-lg border overflow-hidden">
 				<table class="w-full text-sm">
 					<thead>
@@ -227,7 +176,7 @@
 						</tr>
 					</thead>
 					<tbody>
-						{#each data.guests.sort((a, b) => (a.status === 'running' ? -1 : 1) - (b.status === 'running' ? -1 : 1) || a.name.localeCompare(b.name)) as g (g.vmid)}
+						{#each data.data.guests.slice().sort((a: Guest, b: Guest) => (a.status === 'running' ? -1 : 1) - (b.status === 'running' ? -1 : 1) || a.name.localeCompare(b.name)) as g (g.vmid)}
 							<tr class="border-b last:border-0 hover:bg-muted/30 transition-colors">
 								<td class="px-3 py-2">
 									<span class="font-medium">{g.name}</span>
