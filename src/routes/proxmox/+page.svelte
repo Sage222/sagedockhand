@@ -1,3 +1,7 @@
+<svelte:head>
+	<title>Proxmox — Dockhand</title>
+</svelte:head>
+
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
@@ -64,6 +68,11 @@
 			if (points[i] !== null && isFinite(points[i] as number)) return points[i];
 		}
 		return null;
+	}
+
+	// Returns true if every value in the series is null (PSI not reported by kernel)
+	function allNull(points: (number | null)[]): boolean {
+		return points.every(v => v === null || !isFinite(v as number));
 	}
 
 	async function refresh() {
@@ -180,6 +189,8 @@
 			{@const netoutLast = lastVal(netoutSeries)}
 			{@const cpuPsiLast = lastVal(cpuPsiSeries)}
 			{@const memPsiLast = lastVal(memPsiSeries)}
+			{@const cpuPsiUnavailable = allNull(cpuPsiSeries)}
+			{@const memPsiUnavailable = allNull(memPsiSeries)}
 
 			<div class="grid grid-cols-1 md:grid-cols-3 gap-3">
 				<!-- Network graph -->
@@ -205,18 +216,20 @@
 				<div class="rounded-lg border bg-card p-3 space-y-1">
 					<div class="flex items-center justify-between">
 						<span class="text-xs font-medium text-muted-foreground">CPU Pressure (1h)</span>
-						{#if cpuPsiLast !== null}
+						{#if cpuPsiUnavailable}
+							<span class="text-xs text-muted-foreground">n/a</span>
+						{:else if cpuPsiLast !== null}
 							<span class="text-xs tabular-nums {cpuPsiLast > 20 ? 'text-destructive' : cpuPsiLast > 5 ? 'text-yellow-500' : 'text-muted-foreground'}">{cpuPsiLast.toFixed(1)}%</span>
 						{:else}
 							<span class="text-xs text-muted-foreground">n/a</span>
 						{/if}
 					</div>
-					{#if cpuPsiLast !== null && sparkline(cpuPsiSeries)}
+					{#if !cpuPsiUnavailable && cpuPsiLast !== null && sparkline(cpuPsiSeries)}
 						<svg viewBox="0 0 200 40" class="w-full" preserveAspectRatio="none" style="height:48px">
 							<polyline points={sparkline(cpuPsiSeries)} fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
 						</svg>
 					{:else}
-						<div class="flex items-center justify-center h-12 text-xs text-muted-foreground">Requires PVE 8+ with PSI enabled</div>
+						<div class="flex items-center justify-center h-12 text-xs text-muted-foreground italic">PSI not enabled on this node</div>
 					{/if}
 				</div>
 
@@ -224,18 +237,20 @@
 				<div class="rounded-lg border bg-card p-3 space-y-1">
 					<div class="flex items-center justify-between">
 						<span class="text-xs font-medium text-muted-foreground">Memory Pressure (1h)</span>
-						{#if memPsiLast !== null}
+						{#if memPsiUnavailable}
+							<span class="text-xs text-muted-foreground">n/a</span>
+						{:else if memPsiLast !== null}
 							<span class="text-xs tabular-nums {memPsiLast > 10 ? 'text-destructive' : memPsiLast > 2 ? 'text-yellow-500' : 'text-muted-foreground'}">{memPsiLast.toFixed(1)}%</span>
 						{:else}
 							<span class="text-xs text-muted-foreground">n/a</span>
 						{/if}
 					</div>
-					{#if memPsiLast !== null && sparkline(memPsiSeries)}
+					{#if !memPsiUnavailable && memPsiLast !== null && sparkline(memPsiSeries)}
 						<svg viewBox="0 0 200 40" class="w-full" preserveAspectRatio="none" style="height:48px">
 							<polyline points={sparkline(memPsiSeries)} fill="none" stroke="#34d399" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
 						</svg>
 					{:else}
-						<div class="flex items-center justify-center h-12 text-xs text-muted-foreground">Requires PVE 8+ with PSI enabled</div>
+						<div class="flex items-center justify-center h-12 text-xs text-muted-foreground italic">PSI not enabled on this node</div>
 					{/if}
 				</div>
 			</div>

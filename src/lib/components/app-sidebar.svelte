@@ -95,6 +95,7 @@
 
 	const menuItems: readonly MenuItem[] = [
 		{ href: '/', Icon: LayoutDashboard, label: 'Dashboard', permission: 'always' },
+		{ href: '/proxmox', Icon: Server, label: 'Proxmox', permission: 'always' },
 		{ href: '/containers', Icon: Box, label: 'Containers', permission: 'containers' },
 		{ href: '/logs', Icon: ScrollText, label: 'Logs', permission: 'containers' },
 		{ href: '/terminal', Icon: Terminal, label: 'Shell', permission: 'containers' },
@@ -105,7 +106,6 @@
 		{ href: '/registry', Icon: Download, label: 'Registry', permission: 'registries' },
 		{ href: '/activity', Icon: Activity, label: 'Activity', permission: 'activity' },
 		{ href: '/schedules', Icon: Timer, label: 'Schedules', permission: 'schedules' },
-		{ href: '/proxmox', Icon: Server, label: 'Proxmox', permission: 'always' },
 		{ href: '/audit', Icon: ClipboardList, label: 'Audit log', permission: 'audit_logs', enterpriseOnly: true },
 		{ href: '/settings', Icon: Settings, label: 'Settings', permission: 'settings' }
 	] as const;
