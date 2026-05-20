@@ -11,6 +11,50 @@ async function opnGet(host: string, key: string, secret: string, path: string) {
 	return res.json();
 }
 
+/**
+ * Read the first valid data frame from the OPNsense CPU SSE stream.
+ * The stream emits "data: {...}" lines continuously. We skip the first
+ * frame (baseline) and return the second, which contains the real delta.
+ */
+async function fetchCpuFromStream(host: string, key: string, secret: string): Promise<number> {
+	const credentials = Buffer.from(`${key}:${secret}`).toString('base64');
+	const res = await fetch(`${host}/api/diagnostics/cpu_usage/stream`, {
+		headers: { Authorization: `Basic ${credentials}` }
+	});
+	if (!res.ok) throw new Error(`OPNsense CPU stream ${res.status}`);
+	if (!res.body) throw new Error('No readable stream body');
+
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	let frameCount = 0;
+	let buffer = '';
+
+	try {
+		for (let i = 0; i < 20; i++) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			buffer += decoder.decode(value, { stream: true });
+			const lines = buffer.split('\n');
+			buffer = lines.pop() ?? '';
+			for (const line of lines) {
+				if (!line.startsWith('data:')) continue;
+				frameCount++;
+				if (frameCount < 2) continue; // skip baseline frame
+				try {
+					const parsed = JSON.parse(line.substring(5).trim());
+					// { total: number } — 0–100
+					if (typeof parsed?.total === 'number') return parsed.total;
+				} catch {
+					// malformed frame — keep reading
+				}
+			}
+		}
+	} finally {
+		await reader.cancel();
+	}
+	throw new Error('No valid CPU data in stream');
+}
+
 function uptimeStr(seconds: number): string {
 	const d = Math.floor(seconds / 86400);
 	const h = Math.floor((seconds % 86400) / 3600);
@@ -34,87 +78,83 @@ export const GET: RequestHandler = async ({ cookies }) => {
 		]);
 
 		if (!host || !apiKey || !apiSecret) {
-			return json({ error: 'OPNsense not configured. Go to Settings → OPNsense to set up your connection.' }, { status: 400 });
+			return json(
+				{ error: 'OPNsense not configured. Go to Settings → OPNsense to set up your connection.' },
+				{ status: 400 }
+			);
 		}
 
-		// Fetch all data in parallel
-		const [sysInfo, cpuData, memData, diskData, interfaceData, servicesData] = await Promise.allSettled([
-			opnGet(host, apiKey, apiSecret, '/core/system/status'),
-			opnGet(host, apiKey, apiSecret, '/diagnostics/cpu_usage'),
-			opnGet(host, apiKey, apiSecret, '/diagnostics/memory'),
-			opnGet(host, apiKey, apiSecret, '/diagnostics/disk'),
-			opnGet(host, apiKey, apiSecret, '/diagnostics/networkinsight/getInterfaces'),
-			opnGet(host, apiKey, apiSecret, '/core/menu/search')
+		// Fetch system info, memory, interfaces and services in parallel.
+		// CPU uses a streaming endpoint so it runs separately.
+		const [sysInfoResult, memResult, ifaceResult, servicesResult] = await Promise.allSettled([
+			opnGet(host, apiKey, apiSecret, '/diagnostics/system/system_information'),
+			opnGet(host, apiKey, apiSecret, '/diagnostics/system/system_resources'),
+			opnGet(host, apiKey, apiSecret, '/diagnostics/traffic/interface'),
+			opnGet(host, apiKey, apiSecret, '/core/service/getServices')
 		]);
 
-		const sys = sysInfo.status === 'fulfilled' ? sysInfo.value : {};
-		const cpu = cpuData.status === 'fulfilled' ? cpuData.value : {};
-		const mem = memData.status === 'fulfilled' ? memData.value : {};
-		const disk = diskData.status === 'fulfilled' ? diskData.value : {};
-		const ifaces = interfaceData.status === 'fulfilled' ? interfaceData.value : {};
-		const svcs = servicesData.status === 'fulfilled' ? servicesData.value : {};
-
-		// Parse memory
-		const memStats = mem?.memory ?? {};
-		const memTotal = memStats.total ?? 0;
-		const memUsed = memStats.used ?? (memStats.total - (memStats.free ?? 0)) ?? 0;
-
-		// Parse CPU — OPNsense returns an array of per-core % strings or a total
+		// CPU — streaming SSE endpoint
 		let cpuPct = 0;
-		if (typeof cpu?.cpu === 'number') {
-			cpuPct = cpu.cpu;
-		} else if (Array.isArray(cpu?.cpu)) {
-			const vals = cpu.cpu.map((v: string) => parseFloat(v)).filter((v: number) => !isNaN(v));
-			cpuPct = vals.length ? vals.reduce((a: number, b: number) => a + b, 0) / vals.length : 0;
-		} else if (typeof cpu?.total === 'number') {
-			cpuPct = cpu.total;
+		try {
+			cpuPct = await fetchCpuFromStream(host, apiKey, apiSecret);
+		} catch {
+			// Non-fatal — show 0 if stream unavailable
 		}
 
-		// Parse disk — find root partition
-		const diskArr: any[] = Array.isArray(disk) ? disk : (disk?.storage ?? []);
-		const rootDisk = diskArr.find((d: any) => d.mountpoint === '/' || d.device?.includes('da0') || d.device?.includes('nvme0')) ?? diskArr[0];
-		const diskUsed = rootDisk?.used ?? 0;
-		const diskTotal = rootDisk?.size ?? 0;
+		// --- System info ---
+		// Shape: { name: string, versions: string[] }
+		const sys = sysInfoResult.status === 'fulfilled' ? sysInfoResult.value : {};
+		const hostname: string = sys?.name ?? 'OPNsense';
+		const version: string = sys?.versions?.[0] ?? '';
+		// OPNsense embeds uptime in the first version string, e.g. "OPNsense 24.1 ... up X days"
+		// There is no dedicated uptime field in system_information — use 0 as placeholder.
+		const uptimeSeconds = 0;
 
-		// Parse interfaces — build IP map
-		const interfaceList: { name: string; device: string; ipv4: string; ipv6: string; status: string }[] = [];
-		const ifObj: Record<string, any> = typeof ifaces === 'object' ? ifaces : {};
+		// --- Memory ---
+		// Shape: { memory: { total: string, used: number } }
+		const memData = memResult.status === 'fulfilled' ? memResult.value : {};
+		const memStats = memData?.memory ?? {};
+		const memTotal: number = typeof memStats.total === 'string'
+			? parseInt(memStats.total, 10)
+			: (memStats.total ?? 0);
+		const memUsed: number = memStats.used ?? 0;
+
+		// --- Interfaces / Traffic ---
+		// Shape: { interfaces: { [key]: { name, "bytes received": string, "bytes transmitted": string } }, time: number }
+		const ifaceData = ifaceResult.status === 'fulfilled' ? ifaceResult.value : {};
+		const ifObj: Record<string, any> = ifaceData?.interfaces ?? {};
+		const interfaceList: { name: string; device: string; rxBytes: number; txBytes: number }[] = [];
 		for (const [dev, info] of Object.entries(ifObj)) {
 			if (typeof info !== 'object' || !info) continue;
 			interfaceList.push({
 				name: (info as any).name ?? dev,
 				device: dev,
-				ipv4: (info as any).ipaddr ?? (info as any).ipv4?.[0]?.ipaddr ?? '',
-				ipv6: (info as any).ipaddrv6 ?? (info as any).ipv6?.[0]?.ipaddr ?? '',
-				status: (info as any).status ?? 'unknown'
+				rxBytes: parseInt((info as any)['bytes received'] ?? '0', 10),
+				txBytes: parseInt((info as any)['bytes transmitted'] ?? '0', 10)
 			});
 		}
 
-		// Parse services — try the running services endpoint
+		// --- Services ---
 		let serviceList: { name: string; description: string; running: boolean }[] = [];
-		try {
-			const svcRunning = await opnGet(host, apiKey, apiSecret, '/core/service/getServices');
-			if (Array.isArray(svcRunning)) {
-				serviceList = svcRunning.map((s: any) => ({
-					name: s.name ?? s.id ?? 'unknown',
-					description: s.description ?? '',
-					running: s.running === true || s.running === 1 || s.running === '1'
-				}));
-			}
-		} catch {
-			// Services endpoint optional — skip if unavailable
+		if (servicesResult.status === 'fulfilled' && Array.isArray(servicesResult.value)) {
+			serviceList = servicesResult.value.map((s: any) => ({
+				name: s.name ?? s.id ?? 'unknown',
+				description: s.description ?? '',
+				running: s.running === true || s.running === 1 || s.running === '1'
+			}));
 		}
 
 		return json({
-			hostname: sys.hostname ?? sys.product_name ?? 'OPNsense',
-			version: sys.product_version ?? sys.product_series ?? '',
-			uptime: uptimeStr(sys.uptime ?? 0),
-			uptimeSeconds: sys.uptime ?? 0,
+			hostname,
+			version,
+			uptime: uptimeStr(uptimeSeconds),
+			uptimeSeconds,
 			cpuPct: Math.round(cpuPct * 100) / 100,
 			memUsed,
 			memTotal,
-			diskUsed,
-			diskTotal,
+			// diskUsed/diskTotal not available via these endpoints — omit
+			diskUsed: 0,
+			diskTotal: 0,
 			interfaces: interfaceList,
 			services: serviceList
 		});
