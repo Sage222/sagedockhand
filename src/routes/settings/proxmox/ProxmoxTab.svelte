@@ -6,6 +6,8 @@
 	let tokenId = $state('');
 	let tokenSecret = $state('');
 	let node = $state('pve');
+	let manageTokenId = $state('');
+	let manageTokenSecret = $state('');
 
 	let saving = $state(false);
 	let testing = $state(false);
@@ -22,48 +24,33 @@
 				tokenId = data.tokenId ?? '';
 				tokenSecret = data.tokenSecret ?? '';
 				node = data.node ?? 'pve';
+				manageTokenId = data.manageTokenId ?? '';
+				manageTokenSecret = data.manageTokenSecret ?? '';
 			}
 		} catch {}
 	});
 
 	async function save() {
-		saving = true;
-		saveStatus = 'idle';
+		saving = true; saveStatus = 'idle';
 		try {
 			const res = await fetch('/api/settings/proxmox', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ host, tokenId, tokenSecret, node })
+				body: JSON.stringify({ host, tokenId, tokenSecret, node, manageTokenId, manageTokenSecret })
 			});
 			saveStatus = res.ok ? 'saved' : 'error';
 			setTimeout(() => { saveStatus = 'idle'; }, 2500);
-		} catch {
-			saveStatus = 'error';
-		} finally {
-			saving = false;
-		}
+		} catch { saveStatus = 'error'; } finally { saving = false; }
 	}
 
 	async function testConnection() {
-		testing = true;
-		testStatus = 'idle';
-		testMessage = '';
+		testing = true; testStatus = 'idle'; testMessage = '';
 		try {
 			const res = await fetch('/api/proxmox');
 			const json = await res.json();
-			if (json.error) {
-				testStatus = 'fail';
-				testMessage = json.error;
-			} else {
-				testStatus = 'ok';
-				testMessage = `Connected to node "${json.node}" — ${json.vmsTotal} guest(s) found.`;
-			}
-		} catch (e: any) {
-			testStatus = 'fail';
-			testMessage = e.message;
-		} finally {
-			testing = false;
-		}
+			if (json.error) { testStatus = 'fail'; testMessage = json.error; }
+			else { testStatus = 'ok'; testMessage = `Connected to node "${json.node}" — ${json.vmsTotal} guest(s) found.`; }
+		} catch (e: any) { testStatus = 'fail'; testMessage = e.message; } finally { testing = false; }
 	}
 </script>
 
@@ -74,95 +61,73 @@
 	</div>
 
 	<div class="rounded-lg border bg-card p-5 space-y-5">
-		<!-- Host -->
+		<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Read-only token (monitoring)</p>
+
 		<div class="space-y-1.5">
 			<label for="pve-host" class="text-sm font-medium">Host URL</label>
-			<input
-				id="pve-host"
-				bind:value={host}
-				placeholder="https://192.168.1.100:8006"
-				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-			/>
-			<p class="text-xs text-muted-foreground">Include the protocol and port, e.g. <code class="font-mono">https://192.168.1.100:8006</code></p>
+			<input id="pve-host" bind:value={host} placeholder="https://192.168.1.100:8006"
+				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
+			<p class="text-xs text-muted-foreground">Include protocol and port, e.g. <code class="font-mono">https://192.168.1.100:8006</code></p>
 		</div>
 
-		<!-- Token ID -->
 		<div class="space-y-1.5">
 			<label for="pve-token-id" class="text-sm font-medium">API Token ID</label>
-			<input
-				id="pve-token-id"
-				bind:value={tokenId}
-				placeholder="root@pam!dockhand"
-				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-			/>
-			<p class="text-xs text-muted-foreground">Format: <code class="font-mono">user@realm!tokenname</code> — create under Datacenter → Permissions → API Tokens in PVE.</p>
+			<input id="pve-token-id" bind:value={tokenId} placeholder="root@pam!dockhand"
+				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+			<p class="text-xs text-muted-foreground">Format: <code class="font-mono">user@realm!tokenname</code></p>
 		</div>
 
-		<!-- Token Secret -->
 		<div class="space-y-1.5">
 			<label for="pve-token-secret" class="text-sm font-medium">API Token Secret</label>
-			<input
-				id="pve-token-secret"
-				type="password"
-				bind:value={tokenSecret}
-				placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-			/>
+			<input id="pve-token-secret" type="password" bind:value={tokenSecret} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
 		</div>
 
-		<!-- Node -->
 		<div class="space-y-1.5">
 			<label for="pve-node" class="text-sm font-medium">Node Name</label>
-			<input
-				id="pve-node"
-				bind:value={node}
-				placeholder="pve"
-				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-			/>
-			<p class="text-xs text-muted-foreground">The node name as it appears in PVE (default: <code class="font-mono">pve</code>).</p>
-		</div>
-
-		<!-- Actions -->
-		<div class="flex items-center gap-3 pt-1">
-			<button
-				onclick={save}
-				disabled={saving}
-				class="inline-flex items-center gap-2 bg-primary text-primary-foreground text-sm px-4 py-2 rounded-md hover:opacity-90 transition-opacity disabled:opacity-60"
-			>
-				{#if saving}
-					<Loader2 class="w-4 h-4 animate-spin" />
-				{:else}
-					<Save class="w-4 h-4" />
-				{/if}
-				Save
-			</button>
-
-			<button
-				onclick={testConnection}
-				disabled={testing}
-				class="inline-flex items-center gap-2 border text-sm px-4 py-2 rounded-md hover:bg-muted transition-colors disabled:opacity-60"
-			>
-				{#if testing}
-					<Loader2 class="w-4 h-4 animate-spin" />
-				{:else}
-					<TestTube2 class="w-4 h-4" />
-				{/if}
-				Test connection
-			</button>
-
-			{#if saveStatus === 'saved'}
-				<span class="inline-flex items-center gap-1.5 text-sm text-green-600 dark:text-green-400">
-					<CheckCircle2 class="w-4 h-4" />Saved
-				</span>
-			{:else if saveStatus === 'error'}
-				<span class="inline-flex items-center gap-1.5 text-sm text-destructive">
-					<XCircle class="w-4 h-4" />Save failed
-				</span>
-			{/if}
+			<input id="pve-node" bind:value={node} placeholder="pve"
+				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+			<p class="text-xs text-muted-foreground">Node name as shown in PVE (default: <code class="font-mono">pve</code>)</p>
 		</div>
 	</div>
 
-	<!-- Test result -->
+	<div class="rounded-lg border bg-card p-5 space-y-5">
+		<div>
+			<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Manage token (VM start / stop / restart)</p>
+			<p class="text-xs text-muted-foreground mt-1">Optional. Create a separate token in PVE with <code class="font-mono">VM.PowerMgmt</code> permission (and <code class="font-mono">VM.Audit</code>). Leave blank to disable power controls.</p>
+		</div>
+
+		<div class="space-y-1.5">
+			<label for="pve-manage-token-id" class="text-sm font-medium">Manage Token ID</label>
+			<input id="pve-manage-token-id" bind:value={manageTokenId} placeholder="root@pam!dockhand-manage"
+				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+		</div>
+
+		<div class="space-y-1.5">
+			<label for="pve-manage-token-secret" class="text-sm font-medium">Manage Token Secret</label>
+			<input id="pve-manage-token-secret" type="password" bind:value={manageTokenSecret} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+				class="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+		</div>
+	</div>
+
+	<div class="flex items-center gap-3">
+		<button onclick={save} disabled={saving}
+			class="inline-flex items-center gap-2 bg-primary text-primary-foreground text-sm px-4 py-2 rounded-md hover:opacity-90 transition-opacity disabled:opacity-60">
+			{#if saving}<Loader2 class="w-4 h-4 animate-spin" />{:else}<Save class="w-4 h-4" />{/if}
+			Save
+		</button>
+		<button onclick={testConnection} disabled={testing}
+			class="inline-flex items-center gap-2 border text-sm px-4 py-2 rounded-md hover:bg-muted transition-colors disabled:opacity-60">
+			{#if testing}<Loader2 class="w-4 h-4 animate-spin" />{:else}<TestTube2 class="w-4 h-4" />{/if}
+			Test connection
+		</button>
+		{#if saveStatus === 'saved'}
+			<span class="inline-flex items-center gap-1.5 text-sm text-green-600 dark:text-green-400"><CheckCircle2 class="w-4 h-4" />Saved</span>
+		{:else if saveStatus === 'error'}
+			<span class="inline-flex items-center gap-1.5 text-sm text-destructive"><XCircle class="w-4 h-4" />Save failed</span>
+		{/if}
+	</div>
+
 	{#if testStatus !== 'idle'}
 		<div class="rounded-md border p-3 flex items-start gap-2.5 text-sm {testStatus === 'ok' ? 'border-green-500/30 bg-green-500/5' : 'border-destructive/30 bg-destructive/5'}">
 			{#if testStatus === 'ok'}
@@ -177,6 +142,6 @@
 
 	<div class="rounded-md border bg-muted/30 p-4 space-y-1.5 text-xs text-muted-foreground">
 		<p class="font-medium text-foreground text-sm">TLS / Self-signed certificates</p>
-		<p>Proxmox uses a self-signed certificate by default. If you see a TLS error, set the environment variable <code class="font-mono">NODE_TLS_REJECT_UNAUTHORIZED=0</code> in your Docker container and restart.</p>
+		<p>Proxmox uses a self-signed certificate by default. If you see a TLS error, set <code class="font-mono">NODE_TLS_REJECT_UNAUTHORIZED=0</code> in your Docker environment and restart.</p>
 	</div>
 </div>
