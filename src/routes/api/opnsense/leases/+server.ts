@@ -2,15 +2,6 @@ import { json, type RequestHandler } from '@sveltejs/kit';
 import { getSetting } from '$lib/server/db';
 import { authorize } from '$lib/server/authorize';
 
-async function opnGet(host: string, key: string, secret: string, path: string) {
-	const credentials = Buffer.from(`${key}:${secret}`).toString('base64');
-	const res = await fetch(`${host}/api${path}`, {
-		headers: { Authorization: `Basic ${credentials}` }
-	});
-	if (!res.ok) throw new Error(`OPNsense API ${res.status}`);
-	return res.json();
-}
-
 export const GET: RequestHandler = async ({ cookies }) => {
 	const auth = await authorize(cookies);
 	if (auth.authEnabled && !auth.isAuthenticated) {
@@ -28,9 +19,31 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			return json({ error: 'OPNsense not configured' }, { status: 400 });
 		}
 
-		const data = await opnGet(host, apiKey, apiSecret, '/dhcpv4/leases/searchLease');
+		const credentials = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
 
-		// Normalise — OPNsense returns { rows: [...], total, ... }
+		// OPNsense DHCP leases require a POST to searchLease — a GET to this path returns 404.
+		// Ref: https://docs.opnsense.org/development/api/core/dhcpv4.html
+		const res = await fetch(`${host}/api/dhcpv4/leases/searchLease`, {
+			method: 'POST',
+			headers: {
+				Authorization: `Basic ${credentials}`,
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify({
+				current: 1,
+				rowCount: 9999,
+				searchPhrase: '',
+				sort: {}
+			})
+		});
+
+		if (!res.ok) {
+			throw new Error(`OPNsense DHCP API ${res.status}: ${res.statusText}`);
+		}
+
+		const data = await res.json();
+
+		// Response shape: { rows: [...], rowCount: N, total: N, current: 1 }
 		const rows: any[] = Array.isArray(data) ? data : (data?.rows ?? []);
 
 		const leases = rows.map((l: any) => ({
