@@ -11,8 +11,14 @@ async function pveGet(host: string, tokenId: string, tokenSecret: string, path: 
 	return body.data;
 }
 
-// Fetch QEMU guest agent IPs — returns first non-loopback IPv4, or null
-async function getVmIp(host: string, tokenId: string, tokenSecret: string, node: string, vmid: number): Promise<string | null> {
+// Strip CIDR suffix from IP e.g. "10.0.0.205/24" -> "10.0.0.205"
+function stripCidr(ip: string | null | undefined): string | null {
+	if (!ip) return null;
+	return ip.split('/')[0].trim() || null;
+}
+
+// Get IP for a QEMU VM via guest agent
+async function getQemuIp(host: string, tokenId: string, tokenSecret: string, node: string, vmid: number): Promise<string | null> {
 	try {
 		const ifaces = await pveGet(host, tokenId, tokenSecret, `/nodes/${node}/qemu/${vmid}/agent/network-get-interfaces`);
 		const results: any[] = ifaces?.result ?? [];
@@ -30,11 +36,42 @@ async function getVmIp(host: string, tokenId: string, tokenSecret: string, node:
 	}
 }
 
-export const load: PageServerLoad = async ({ cookies }) => {
+// Get IP for an LXC container — top-level ip field first, then parse net0 from config
+async function getLxcIp(host: string, tokenId: string, tokenSecret: string, node: string, g: any): Promise<string | null> {
+	// Top-level ip field (some PVE versions, usually CIDR format)
+	if (g.ip) return stripCidr(g.ip);
+
+	// Fall back to reading config net0 field
+	try {
+		const config = await pveGet(host, tokenId, tokenSecret, `/nodes/${node}/lxc/${g.vmid}/config`);
+		const net0: string = config?.net0 ?? '';
+		// net0 looks like: "name=eth0,bridge=vmbr0,ip=10.0.0.205/24,..."
+		const match = net0.match(/(?:^|,)ip=([^,]+)/);
+		if (match) return stripCidr(match[1]);
+	} catch {
+		// silently ignore
+	}
+	return null;
+}
+
+// Module-level server-side cache — avoids re-fetching on every nav click
+let cache: { ts: number; result: any } | null = null;
+const CACHE_TTL_MS = 30_000;
+
+export const load: PageServerLoad = async ({ cookies, depends }) => {
+	// Register a dependency key so manual invalidateAll() still triggers a real fetch
+	depends('proxmox:data');
+
 	const auth = await authorize(cookies);
 	if (auth.authEnabled && !auth.isAuthenticated) {
 		return { error: 'Authentication required', data: null, rrd: null, hasManageToken: false };
 	}
+
+	// Return cached result if it's still fresh
+	if (cache && Date.now() - cache.ts < CACHE_TTL_MS) {
+		return cache.result;
+	}
+
 	try {
 		const [host, tokenId, tokenSecret, node, manageTokenId, manageTokenSecret] = await Promise.all([
 			getSetting('proxmox_host'),
@@ -70,20 +107,19 @@ export const load: PageServerLoad = async ({ cookies }) => {
 		const running = allGuests.filter((g: any) => g.status === 'running');
 		const stopped = allGuests.filter((g: any) => g.status === 'stopped');
 
-		// Fetch IPs for running guests in parallel
+		// Fetch IPs for all guests in parallel
 		const guestIps: Record<number, string | null> = {};
 		await Promise.all(allGuests.map(async (g: any) => {
 			if (g.status !== 'running') { guestIps[g.vmid] = null; return; }
 			const isLxc = !!lxcsData.find((l: any) => l.vmid === g.vmid);
 			if (isLxc) {
-				guestIps[g.vmid] = g.ip ?? null;
+				guestIps[g.vmid] = await getLxcIp(host, tokenId, tokenSecret, nodeName, g);
 			} else {
-				guestIps[g.vmid] = await getVmIp(host, tokenId, tokenSecret, nodeName, g.vmid);
+				guestIps[g.vmid] = await getQemuIp(host, tokenId, tokenSecret, nodeName, g.vmid);
 			}
 		}));
 
 		// Build RRD points — last 60 mins
-		// PVE node RRD field names vary slightly across versions; try all known variants
 		const memTotal = ns.memory?.total ?? 0;
 		const rrdPoints = rrdData.map((p: any) => {
 			const memUsed = p.memory ?? p.memused ?? null;
@@ -97,7 +133,7 @@ export const load: PageServerLoad = async ({ cookies }) => {
 			};
 		});
 
-		return {
+		const result = {
 			notConfigured: false,
 			error: null,
 			hasManageToken,
@@ -127,8 +163,15 @@ export const load: PageServerLoad = async ({ cookies }) => {
 			},
 			rrd: rrdPoints
 		};
+
+		// Store in cache
+		cache = { ts: Date.now(), result };
+		return result;
+
 	} catch (err: any) {
 		console.error('Proxmox page load error:', err);
+		// On error, return stale cache if available rather than showing an error
+		if (cache) return cache.result;
 		return { error: err.message ?? 'Failed to connect to Proxmox', data: null, rrd: null, hasManageToken: false };
 	}
 };

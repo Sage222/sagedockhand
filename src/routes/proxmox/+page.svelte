@@ -3,7 +3,7 @@
 </svelte:head>
 
 <script lang="ts">
-	import { invalidateAll } from '$app/navigation';
+	import { invalidate } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
 	import {
 		Server, Cpu, MemoryStick, HardDrive, Play, Square, RefreshCw,
@@ -75,9 +75,11 @@
 		return null;
 	}
 
+	// Use targeted invalidation — only busts the proxmox:data dependency,
+	// not the entire page, so nav clicks that hit the server cache are instant.
 	async function refresh() {
 		refreshing = true;
-		await invalidateAll();
+		await invalidate('proxmox:data');
 		refreshing = false;
 	}
 
@@ -99,7 +101,7 @@
 		}
 	}
 
-	onMount(() => { interval = setInterval(refresh, 15000); });
+	onMount(() => { interval = setInterval(refresh, 30_000); });
 	onDestroy(() => clearInterval(interval));
 </script>
 
@@ -246,7 +248,7 @@
 		{/if}
 
 		<!-- Uptime -->
-		<div class="text-xs text-muted-foreground">Node uptime: {fmtUptime(data.data.uptime)} · auto-refreshes every 15s</div>
+		<div class="text-xs text-muted-foreground">Node uptime: {fmtUptime(data.data.uptime)} · auto-refreshes every 30s</div>
 
 		<!-- Guest table -->
 		{#if data.data.guests.length > 0}
