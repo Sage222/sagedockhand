@@ -16,7 +16,7 @@
 
 ## About
 
-WARNING: WORK IN PROGRESS! Currently working in BETA. Add your Proxmox API and Opnsense API details to settings to begin management/monitoring.
+WARNING: WORK IN PROGRESS! Currently working in BETA. Add your Proxmox API and Opnsense API details to the Settings Submenu to begin management/monitoring.
 
 *********** Fork of the awesome Dockhand.  Trying to add proxmox & opnsense management/monitoring.************
 
