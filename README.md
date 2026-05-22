@@ -16,9 +16,11 @@
 
 ## About
 
-WARNING: WORK IN PROGRESS!
+WARNING: WORK IN PROGRESS! Currently working in BETA. Add your Proxmox API and Opnsense API details to settings to begin management/monitoring.
 
-Fork of the awesome Dockhand.  Trying to add proxmox & opnsense management/monitoring.
+*********** Fork of the awesome Dockhand.  Trying to add proxmox & opnsense management/monitoring.************
+
+
 
 Dockhand is a modern, efficient Docker management application providing real-time container management, Compose stack orchestration, and multi-environment support.  All in a lightweight, secure and privacy-focused package.
 
