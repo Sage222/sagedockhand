@@ -136,10 +136,12 @@ export const GET: RequestHandler = async ({ cookies }) => {
 				diskTotal = parseSize(rootDisk.size);
 				if (rootDisk.used !== undefined) {
 					diskUsed = parseSize(rootDisk.used);
-				} else if (rootDisk.capacity !== undefined) {
+				} else if (rootDisk.capacity !== undefined && diskTotal > 0) {
 					const pctNum = parseFloat(String(rootDisk.capacity).replace('%', ''));
 					if (!isNaN(pctNum)) diskUsed = Math.round(diskTotal * pctNum / 100);
 				}
+				// If OPNsense gave us usage but no total, fall back to size = used
+				if (diskUsed > 0 && diskTotal === 0) diskTotal = diskUsed;
 			}
 		}
 

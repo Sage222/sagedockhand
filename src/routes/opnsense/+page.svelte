@@ -241,9 +241,9 @@
 							<span class="text-xl font-bold tabular-nums">{pct(data.diskUsed, data.diskTotal)}<span class="text-sm font-normal text-muted-foreground">%</span></span>
 						</div>
 						<div class="w-full h-2 rounded-full bg-muted overflow-hidden">
-							<div class="h-full rounded-full transition-all {barColor(pct(data.diskUsed, data.diskTotal))}" style="width:{pct(data.diskUsed, data.diskTotal)}%"></div>
+							<div class="h-full rounded-full transition-all {barColor(pct(data.diskUsed, data.diskTotal))}" style="width:{data.diskTotal > 0 ? pct(data.diskUsed, data.diskTotal) : 100}%"></div>
 						</div>
-						<p class="text-xs text-muted-foreground">{fmtBytes(data.diskUsed)} / {fmtBytes(data.diskTotal)}</p>
+						<p class="text-xs text-muted-foreground">{data.diskTotal > 0 ? `${fmtBytes(data.diskUsed)} / ${fmtBytes(data.diskTotal)}` : `${fmtBytes(data.diskUsed)} used`}</p>
 					</div>
 				</div>
 
