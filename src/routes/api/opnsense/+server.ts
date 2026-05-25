@@ -102,22 +102,53 @@ export const GET: RequestHandler = async ({ cookies }) => {
 		}
 
 		// --- System info ---
-		// Shape: { name: string, versions: string[] }
+		// Actual API shape: { name: string, versions: [string, ...] }
 		const sys = sysInfoResult.status === 'fulfilled' ? sysInfoResult.value : {};
 		const hostname: string = sys?.name ?? 'OPNsense';
-		const version: string = sys?.versions?.[0] ?? '';
-		// OPNsense embeds uptime in the first version string, e.g. "OPNsense 24.1 ... up X days"
-		// There is no dedicated uptime field in system_information — use 0 as placeholder.
-		const uptimeSeconds = 0;
+		const version: string = Array.isArray(sys?.versions) ? (sys.versions[0] ?? '') : '';
+
+		// --- Uptime ---
+		// system_information does not expose uptime as a number.
+		// Parse it from versions[0] which looks like:
+		// "OPNsense 26.1.6_2 ... up 3 days, 4:02"
+		let uptimeSeconds = 0;
+		const verStr: string = version;
+		const upMatch = verStr.match(/up\s+(\d+)\s+day[s]?,\s*(\d+):(\d+)/);
+		if (upMatch) {
+			uptimeSeconds = parseInt(upMatch[1]) * 86400 + parseInt(upMatch[2]) * 3600 + parseInt(upMatch[3]) * 60;
+		} else {
+			const hrMatch = verStr.match(/up\s+(\d+):(\d+)/);
+			if (hrMatch) uptimeSeconds = parseInt(hrMatch[1]) * 3600 + parseInt(hrMatch[2]) * 60;
+		}
 
 		// --- Memory ---
-		// Shape: { memory: { total: string, used: number } }
+		// Actual API shape from /diagnostics/system/system_resources:
+		// {
+		//   memory: { total: "2133 MB", used: "921 MB", ... }
+		// }
+		// Values are human-readable strings like "2133 MB" or "921 MB".
+		// We parse them into bytes.
 		const memData = memResult.status === 'fulfilled' ? memResult.value : {};
-		const memStats = memData?.memory ?? {};
-		const memTotal: number = typeof memStats.total === 'string'
-			? parseInt(memStats.total, 10)
-			: (memStats.total ?? 0);
-		const memUsed: number = memStats.used ?? 0;
+		const memStats = memData?.memory ?? memData ?? {};
+
+		function parseMemStr(val: any): number {
+			if (typeof val === 'number') return val;
+			if (typeof val === 'string') {
+				const m = val.match(/([\d.]+)\s*(MB|GB|KB|B)?/i);
+				if (!m) return 0;
+				const n = parseFloat(m[1]);
+				const unit = (m[2] ?? 'B').toUpperCase();
+				if (unit === 'GB') return Math.round(n * 1073741824);
+				if (unit === 'MB') return Math.round(n * 1048576);
+				if (unit === 'KB') return Math.round(n * 1024);
+				return Math.round(n);
+			}
+			return 0;
+		}
+
+		// Field names may be 'total'/'used' or 'total_real'/'used_real' depending on version
+		const memTotal: number = parseMemStr(memStats.total ?? memStats.total_real ?? 0);
+		const memUsed: number  = parseMemStr(memStats.used  ?? memStats.used_real  ?? 0);
 
 		// --- Interfaces / Traffic ---
 		// Shape: { interfaces: { [key]: { name, "bytes received": string, "bytes transmitted": string } }, time: number }
@@ -152,7 +183,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			cpuPct: Math.round(cpuPct * 100) / 100,
 			memUsed,
 			memTotal,
-			// diskUsed/diskTotal not available via these endpoints — omit
+			// Disk not available via these endpoints
 			diskUsed: 0,
 			diskTotal: 0,
 			interfaces: interfaceList,

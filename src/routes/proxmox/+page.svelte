@@ -7,7 +7,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import {
 		Server, Cpu, MemoryStick, HardDrive, Play, Square, RefreshCw,
-		AlertCircle, Settings, Power, RotateCcw, StopCircle, Zap
+		AlertCircle, Settings, Power, RotateCcw, StopCircle, Zap, Loader2
 	} from 'lucide-svelte';
 
 	let { data } = $props();
@@ -21,6 +21,9 @@
 	const REFRESH_INTERVAL_S = 30;
 	let countdown = $state(REFRESH_INTERVAL_S);
 	let countdownInterval: ReturnType<typeof setInterval>;
+
+	// Loading overlay — show on first navigation to the page
+	let initialLoading = $state(!data.data && !data.error && !data.notConfigured);
 
 	type Guest = { vmid: number; name: string; status: string; type: string; cpu: number; mem: number; maxmem: number; uptime: number | null; ip: string | null; };
 	type RrdPoint = { t: number; cpu: number | null; netin: number | null; netout: number | null; mem: number | null; };
@@ -116,6 +119,7 @@
 	}
 
 	onMount(() => {
+		initialLoading = false;
 		resetCountdown();
 		interval = setInterval(() => {
 			refresh();
@@ -128,6 +132,13 @@
 	});
 </script>
 
+<!-- Loading overlay — shown during initial SSR load before hydration -->
+{#if initialLoading}
+	<div class="flex flex-col items-center justify-center gap-3 py-24 text-muted-foreground">
+		<Loader2 class="w-6 h-6 animate-spin" />
+		<span class="text-sm">Loading Proxmox data…</span>
+	</div>
+{:else}
 <div class="flex flex-col gap-4 p-4 max-w-5xl">
 	<!-- Header -->
 	<div class="flex items-center justify-between">
@@ -337,3 +348,4 @@
 		{/if}
 	{/if}
 </div>
+{/if}
