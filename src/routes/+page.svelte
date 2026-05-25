@@ -4,1149 +4,230 @@
 
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { browser } from '$app/environment';
-	import { RefreshCw, LayoutGrid, Loader2, Server, Tags, Square, RectangleVertical, Rows3, LayoutTemplate, Maximize2, Plus, Lock, LockOpen, List, Search, Plug, Route, UndoDot } from 'lucide-svelte';
-	import { toast } from 'svelte-sonner';
+	import { RefreshCw, Server, Box, ShieldCheck, CheckCircle2, XCircle, AlertCircle } from 'lucide-svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
-	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-	import { goto } from '$app/navigation';
-	import { Button } from '$lib/components/ui/button';
-	import EnvironmentTile from './dashboard/EnvironmentTile.svelte';
-	import EnvironmentTileSkeleton from './dashboard/EnvironmentTileSkeleton.svelte';
-	import DraggableGrid, { type GridItemLayout } from './dashboard/DraggableGrid.svelte';
-	import EnvironmentListView from './dashboard/EnvironmentListView.svelte';
-	import { dashboardPreferences, dashboardData, GRID_COLS, GRID_ROW_HEIGHT, type TileItem } from '$lib/stores/dashboard';
-	import { currentEnvironment, environments } from '$lib/stores/environment';
-	import { IsMobile } from '$lib/hooks/is-mobile.svelte';
-	import type { EnvironmentStats } from './api/dashboard/stats/+server';
-	import { getLabelColor, getLabelBgColor } from '$lib/utils/label-colors';
-	import { labelColorOverrides } from '$lib/stores/label-colors';
-	import { Input } from '$lib/components/ui/input';
-	import MultiSelectFilter from '$lib/components/MultiSelectFilter.svelte';
-	import { appSettings } from '$lib/stores/settings';
 
-	const LABEL_FILTER_STORAGE_KEY = 'dockhand-dashboard-label-filter';
-	const REFRESH_INTERVAL_MS = 30000;
-
-	// Real-time event stream for immediate updates
-	let eventSource: EventSource | null = null;
-	let eventReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-	let eventReconnectAttempts = 0;
-	const MAX_EVENT_RECONNECT_ATTEMPTS = 10;
-	const BASE_EVENT_RECONNECT_DELAY = 5000;
-
-	interface EnvironmentInfo {
-		id: number;
-		name: string;
-		host?: string;
-		port?: number | null;
-		icon: string;
-		socketPath?: string;
-		collectActivity: boolean;
-		collectMetrics: boolean;
-		connectionType?: 'socket' | 'direct' | 'hawser-standard' | 'hawser-edge';
-		labels?: string[];
+	interface StatRow {
+		label: string;
+		value: string | number;
+		sub: string;
+		ok: boolean | null;
 	}
 
-	// Use store data with local reactive state for UI updates
-	let tiles = $state<TileItem[]>([]);
-	let gridItems = $state<GridItemLayout[]>([]);
-	let initialLoading = $state(true);
-	let environmentsLoaded = $state(false);
-	let refreshing = $state(false);
-	let prefsLoaded = $state(false);
-	const mobileWatcher = new IsMobile();
-	const isMobile = $derived.by(() => mobileWatcher.current);
+	interface Card {
+		title: string;
+		href: string;
+		Icon: any;
+		rows: StatRow[];
+		loading: boolean;
+		error: string | null;
+	}
 
-	// Dashboard lock and view mode from preferences
-	let locked = $state(false);
-	let viewMode = $state<'grid' | 'list'>('grid');
+	let cards = $state<Card[]>([
+		{ title: 'Proxmox',    href: '/proxmox',    Icon: Server,      rows: [], loading: true, error: null },
+		{ title: 'OPNsense',   href: '/opnsense',   Icon: ShieldCheck, rows: [], loading: true, error: null },
+		{ title: 'Containers', href: '/containers', Icon: Box,         rows: [], loading: true, error: null }
+	]);
 
-	// Countdown to next auto-refresh (seconds)
-	let refreshCountdown = $state(REFRESH_INTERVAL_MS / 1000);
-	let countdownInterval: ReturnType<typeof setInterval> | null = null;
+	let refreshCountdown = $state(30);
+	let countdownInterval: ReturnType<typeof setInterval> | undefined;
 
-	function startCountdown() {
-		if (countdownInterval) clearInterval(countdownInterval);
-		refreshCountdown = REFRESH_INTERVAL_MS / 1000;
+	// ── Proxmox ──────────────────────────────────────────────────────────────
+	async function loadProxmox() {
+		const i = 0;
+		try {
+			const res = await fetch('/api/proxmox');
+			const d = await res.json();
+			if (d.error) { cards[i].error = d.error; cards[i].rows = []; return; }
+			cards[i].error = null;
+			cards[i].rows = [
+				{
+					label: 'VMs / LXCs',
+					value: `${d.vmsRunning ?? 0} running`,
+					sub: `${d.vmsStopped ?? 0} stopped · ${d.vmsTotal ?? 0} total`,
+					ok: (d.vmsRunning ?? 0) > 0
+				},
+				{
+					label: 'Node',
+					value: d.node ?? 'pve',
+					sub: `CPU ${((d.cpu ?? 0) * 100).toFixed(1)}% · up ${d.uptime ? uptimeStr(d.uptime) : '—'}`,
+					ok: true
+				}
+			];
+		} catch (e: any) {
+			cards[i].error = e.message ?? 'Failed to reach Proxmox';
+			cards[i].rows = [];
+		} finally {
+			cards[i].loading = false;
+		}
+	}
+
+	// ── OPNsense ─────────────────────────────────────────────────────────────
+	async function loadOpnsense() {
+		const i = 1;
+		try {
+			const res = await fetch('/api/opnsense');
+			const d = await res.json();
+			if (d.error) { cards[i].error = d.error; cards[i].rows = []; return; }
+			cards[i].error = null;
+			const svcTotal   = d.services?.length ?? 0;
+			const svcRunning = d.services?.filter((s: any) => s.running).length ?? 0;
+			const svcStopped = svcTotal - svcRunning;
+			cards[i].rows = [
+				{
+					label: 'Firewall',
+					value: 'Online',
+					sub: `Uptime ${d.uptime ?? '—'}`,
+					ok: true
+				},
+				{
+					label: 'Services',
+					value: `${svcRunning} / ${svcTotal} running`,
+					sub: svcStopped > 0 ? `${svcStopped} stopped` : svcTotal === 0 ? 'No services returned' : 'All running',
+					ok: svcStopped === 0 && svcTotal > 0
+				}
+			];
+		} catch (e: any) {
+			cards[i].error = e.message ?? 'Failed to reach OPNsense';
+			cards[i].rows = [];
+		} finally {
+			cards[i].loading = false;
+		}
+	}
+
+	// ── Containers (via dashboard/stats) ─────────────────────────────────────
+	async function loadContainers() {
+		const i = 2;
+		try {
+			const res = await fetch('/api/dashboard/stats');
+			const d = await res.json();
+			// Response is an array of per-environment stats
+			const envs: any[] = Array.isArray(d) ? d : [];
+			const running  = envs.reduce((s: number, e: any) => s + (e.containers?.running  ?? 0), 0);
+			const stopped  = envs.reduce((s: number, e: any) => s + (e.containers?.stopped  ?? 0), 0);
+			const total    = envs.reduce((s: number, e: any) => s + (e.containers?.total    ?? 0), 0);
+			const unhealthy = envs.reduce((s: number, e: any) => s + (e.containers?.unhealthy ?? 0), 0);
+			cards[i].error = null;
+			cards[i].rows = [
+				{
+					label: 'Containers',
+					value: `${running} running`,
+					sub: `${stopped} stopped · ${total} total`,
+					ok: running > 0 && unhealthy === 0
+				},
+				...(unhealthy > 0 ? [{
+					label: 'Unhealthy',
+					value: `${unhealthy} container${unhealthy !== 1 ? 's' : ''}`,
+					sub: 'Needs attention',
+					ok: false
+				}] : [])
+			];
+		} catch (e: any) {
+			cards[i].error = e.message ?? 'Failed to load container stats';
+			cards[i].rows = [];
+		} finally {
+			cards[i].loading = false;
+		}
+	}
+
+	function uptimeStr(seconds: number): string {
+		const d = Math.floor(seconds / 86400);
+		const h = Math.floor((seconds % 86400) / 3600);
+		const m = Math.floor((seconds % 3600) / 60);
+		if (d > 0) return `${d}d ${h}h`;
+		if (h > 0) return `${h}h ${m}m`;
+		return `${m}m`;
+	}
+
+	async function fetchAll() {
+		// Reset loading states
+		cards = cards.map(c => ({ ...c, loading: true }));
+		await Promise.allSettled([loadProxmox(), loadOpnsense(), loadContainers()]);
+	}
+
+	function startCycle() {
+		refreshCountdown = 30;
+		clearInterval(countdownInterval);
 		countdownInterval = setInterval(() => {
-			refreshCountdown = Math.max(0, refreshCountdown - 1);
+			refreshCountdown--;
+			if (refreshCountdown <= 0) {
+				fetchAll();
+				refreshCountdown = 30;
+			}
 		}, 1000);
 	}
 
-	// List view filter state
-	let listSearchQuery = $state('');
-	let listConnectionFilter = $state<string[]>([]);
-	const connectionOptions = [
-		{ value: 'socket', label: 'Socket' },
-		{ value: 'direct', label: 'Direct', icon: Plug },
-		{ value: 'hawser-standard', label: 'Standard', icon: Route },
-		{ value: 'hawser-edge', label: 'Edge', icon: UndoDot }
-	];
-
-	// Count of list-filtered results (for header display)
-	const listFilteredCount = $derived.by(() => {
-		let result = filteredTiles;
-		if (listConnectionFilter.length > 0) {
-			result = result.filter(t => {
-				const type = t.stats?.connectionType || 'socket';
-				return listConnectionFilter.includes(type);
-			});
-		}
-		const q = listSearchQuery.trim().toLowerCase();
-		if (q) {
-			result = result.filter(t => {
-				const s = t.stats;
-				if (!s) return false;
-				return s.name.toLowerCase().includes(q) ||
-					s.host?.toLowerCase().includes(q) ||
-					s.labels?.some(l => l.toLowerCase().includes(q));
-			});
-		}
-		return result.length;
-	});
-
-	$effect(() => {
-		const unsubscribe = environments.loaded.subscribe(loaded => {
-			if (loaded) {
-				environmentsLoaded = true;
-
-				const envList = $environments;
-				if (tiles.length === 0 && envList.length > 0) {
-					const skeletonTiles = envList.map(env => ({
-						id: env.id,
-						stats: {
-							id: env.id,
-							name: env.name,
-							host: env.host,
-							port: env.port,
-							icon: env.icon || 'globe',
-							socketPath: env.socketPath,
-							collectActivity: false,
-							collectMetrics: true,
-							connectionType: env.connectionType || 'socket',
-							labels: [],
-							scannerEnabled: false,
-							online: undefined,
-							containers: { total: 0, running: 0, stopped: 0, paused: 0, restarting: 0, unhealthy: 0, pendingUpdates: 0 },
-							images: { total: 0, totalSize: 0 },
-							volumes: { total: 0, totalSize: 0 },
-							containersSize: 0,
-							buildCacheSize: 0,
-							networks: { total: 0 },
-							stacks: { total: 0, running: 0, partial: 0, stopped: 0 },
-							metrics: null,
-							events: { total: 0, today: 0 },
-							topContainers: [],
-							loading: { containers: true, images: true, volumes: true, networks: true, stacks: true, diskUsage: true, topContainers: true }
-						} as EnvironmentStats,
-						info: { id: env.id, name: env.name, host: env.host, port: env.port, icon: env.icon || 'globe', socketPath: env.socketPath, collectActivity: false, collectMetrics: true, connectionType: env.connectionType || 'socket' },
-						loading: true
-					}));
-					tiles = skeletonTiles;
-
-					const savedLayout = $dashboardPreferences.gridLayout;
-					const tileIds = envList.map(env => env.id);
-					const newGridItems = savedLayout.length > 0
-						? mergeLayout(tileIds, savedLayout)
-						: generateDefaultLayout(tileIds);
-					gridItems = newGridItems;
-				}
-			}
-		});
-		return unsubscribe;
-	});
-
-	// Label filtering
-	let filterLabels = $state<string[]>([]);
-	let labelFilterLoaded = $state(false);
-
-	function loadLabelFilter() {
-		if (browser) {
-			try {
-				const saved = localStorage.getItem(LABEL_FILTER_STORAGE_KEY);
-				if (saved) {
-					filterLabels = JSON.parse(saved);
-				}
-			} catch {
-				// Ignore parse errors
-			}
-			labelFilterLoaded = true;
-		}
-	}
-
-	$effect(() => {
-		if (browser && labelFilterLoaded) {
-			localStorage.setItem(LABEL_FILTER_STORAGE_KEY, JSON.stringify(filterLabels));
-		}
-	});
-
-	function toggleLabel(label: string) {
-		if (filterLabels.includes(label)) {
-			filterLabels = filterLabels.filter(l => l !== label);
-		} else {
-			filterLabels = [...filterLabels, label];
-		}
-	}
-
-	const allLabels = $derived.by(() => {
-		const labelSet = new Set<string>();
-		for (const tile of tiles) {
-			const labels = tile.stats?.labels || [];
-			for (const label of labels) {
-				labelSet.add(label);
-			}
-		}
-		return Array.from(labelSet).sort();
-	});
-
-	$effect(() => {
-		if (labelFilterLoaded && filterLabels.length > 0 && tiles.length > 0) {
-			const validLabels = filterLabels.filter(l => allLabels.includes(l));
-			if (validLabels.length !== filterLabels.length) {
-				filterLabels = validLabels;
-			}
-		}
-	});
-
-	const filteredTiles = $derived.by(() => {
-		if (filterLabels.length === 0) {
-			return tiles;
-		}
-		const matchFn = $appSettings.labelFilterMode === 'all'
-			? (tileLabels: string[]) => filterLabels.every(label => tileLabels.includes(label))
-			: (tileLabels: string[]) => filterLabels.some(label => tileLabels.includes(label));
-		return tiles.filter(t => matchFn(t.stats?.labels || []));
-	});
-
-	const filteredGridItems = $derived.by(() => {
-		if (filterLabels.length === 0) {
-			return gridItems;
-		}
-		const matchFn = $appSettings.labelFilterMode === 'all'
-			? (tileLabels: string[]) => filterLabels.every(label => tileLabels.includes(label))
-			: (tileLabels: string[]) => filterLabels.some(label => tileLabels.includes(label));
-		return gridItems.filter(item => {
-			const tile = tiles.find(t => t.id === item.id);
-			return matchFn(tile?.stats?.labels || []);
-		});
-	});
-	const orderedGridItems = $derived.by(() => {
-		return [...filteredGridItems].sort((a, b) => (a.y - b.y) || (a.x - b.x));
-	});
-
-	let abortController: AbortController | null = null;
-
-	let streamConnected = $state(false);
-	let streamConnecting = $state(false);
-	let streamError = $state<string | null>(null);
-
-	const STREAM_CONNECT_TIMEOUT = 30000;
-	const MAX_STREAM_RECONNECT_ATTEMPTS = 5;
-	const INITIAL_STREAM_RECONNECT_DELAY = 3000;
-	let streamReconnectAttempts = 0;
-	let streamReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-	let wasInitialized = true;
-
-	const unsubscribeDashboardData = dashboardData.subscribe(data => {
-		if (data.tiles.length > 0) {
-			tiles = data.tiles;
-		}
-		if (data.gridItems.length > 0) {
-			gridItems = data.gridItems;
-		}
-		if (wasInitialized && !data.initialized && data.tiles.length > 0 && !refreshing) {
-			fetchStatsStreaming(true);
-		}
-		wasInitialized = data.initialized;
-	});
-
-	const unsubscribePrefs = dashboardPreferences.subscribe(prefs => {
-		locked = prefs.locked;
-		viewMode = prefs.viewMode;
-		if (prefs.gridLayout.length > 0 && tiles.length > 0 && !prefsLoaded) {
-			gridItems = prefs.gridLayout.map(item => ({
-				...item,
-				id: item.id
-			}));
-			prefsLoaded = true;
-		}
-	});
-
-	function generateDefaultLayout(tileIds: number[]): GridItemLayout[] {
-		return tileIds.map((id, index) => ({
-			id,
-			x: index % GRID_COLS,
-			y: Math.floor(index / GRID_COLS) * 2,
-			w: 1,
-			h: 2
-		}));
-	}
-
-	function mergeLayout(tileIds: number[], existingLayout: GridItemLayout[]): GridItemLayout[] {
-		const result: GridItemLayout[] = [];
-
-		for (const item of existingLayout) {
-			if (tileIds.includes(item.id)) {
-				result.push(item);
-			}
-		}
-
-		const existingIds = new Set(existingLayout.map(item => item.id));
-		const newIds = tileIds.filter(id => !existingIds.has(id));
-
-		let nextY = result.length > 0 ? Math.max(...result.map(item => item.y + item.h)) : 0;
-		let nextX = 0;
-
-		for (const id of newIds) {
-			if (nextX >= GRID_COLS) {
-				nextX = 0;
-				nextY += 2;
-			}
-			result.push({
-				id,
-				x: nextX,
-				y: nextY,
-				w: 1,
-				h: 2
-			});
-			nextX++;
-		}
-
-		return result;
-	}
-
-	function scheduleStreamReconnect() {
-		if (streamReconnectTimer) {
-			clearTimeout(streamReconnectTimer);
-		}
-
-		if (streamReconnectAttempts >= MAX_STREAM_RECONNECT_ATTEMPTS) {
-			streamError = 'Connection failed - click refresh to retry';
-			return;
-		}
-
-		const delay = INITIAL_STREAM_RECONNECT_DELAY * Math.pow(2, streamReconnectAttempts);
-		streamReconnectAttempts++;
-
-		streamReconnectTimer = setTimeout(() => {
-			fetchStatsStreaming(true);
-		}, delay);
-	}
-
-	function resetStreamReconnect() {
-		streamReconnectAttempts = 0;
-		if (streamReconnectTimer) {
-			clearTimeout(streamReconnectTimer);
-			streamReconnectTimer = null;
-		}
-	}
-
-	let statsStreamFetching = false;
-
-	async function fetchStatsStreaming(isRefresh = false) {
-		if (statsStreamFetching) return;
-
-		if (abortController) {
-			abortController.abort();
-		}
-		abortController = new AbortController();
-		statsStreamFetching = true;
-
-		const timeoutController = new AbortController();
-		const timeoutId = setTimeout(() => {
-			timeoutController.abort();
-		}, STREAM_CONNECT_TIMEOUT);
-
-		streamConnecting = true;
-		streamError = null;
-
-		if (isRefresh) {
-			refreshing = true;
-			tiles = tiles.map(t => ({ ...t, loading: true }));
-			dashboardData.markAllLoading();
-		} else {
-			const cachedData = dashboardData.getData();
-			if (cachedData.tiles.length === 0) {
-				initialLoading = true;
-				tiles = [];
-			} else {
-				refreshing = true;
-				dashboardData.markAllLoading();
-			}
-		}
-
-		try {
-			const response = await fetch('/api/dashboard/stats/stream', {
-				signal: timeoutController.signal
-			});
-
-			clearTimeout(timeoutId);
-
-			if (!response.ok) {
-				throw new Error(`HTTP ${response.status}`);
-			}
-
-			streamConnected = true;
-			streamConnecting = false;
-			resetStreamReconnect();
-
-			const reader = response.body?.getReader();
-			if (!reader) return;
-
-			const decoder = new TextDecoder();
-			let buffer = '';
-
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() || '';
-
-				let eventType = '';
-				let eventData = '';
-
-				for (const line of lines) {
-					if (line.startsWith('event: ')) {
-						eventType = line.slice(7);
-					} else if (line.startsWith('data: ')) {
-						eventData = line.slice(6);
-
-						if (eventType && eventData) {
-							try {
-								const data = JSON.parse(eventData);
-
-								if (eventType === 'environments') {
-									environmentsLoaded = true;
-									const envList = data as (EnvironmentInfo & { loading?: EnvironmentStats['loading'] })[];
-									const cachedData = dashboardData.getData();
-
-									if (cachedData.tiles.length === 0) {
-										const newTiles = envList.map(env => ({
-											id: env.id,
-											stats: {
-												id: env.id,
-												name: env.name,
-												host: env.host,
-												port: env.port,
-												icon: env.icon,
-												socketPath: env.socketPath,
-												collectActivity: env.collectActivity ?? false,
-												collectMetrics: env.collectMetrics ?? true,
-												connectionType: env.connectionType || 'socket',
-												labels: env.labels || [],
-												scannerEnabled: false,
-												online: undefined,
-												containers: { total: 0, running: 0, stopped: 0, paused: 0, restarting: 0, unhealthy: 0, pendingUpdates: 0 },
-												images: { total: 0, totalSize: 0 },
-												volumes: { total: 0, totalSize: 0 },
-												containersSize: 0,
-												buildCacheSize: 0,
-												networks: { total: 0 },
-												stacks: { total: 0, running: 0, partial: 0, stopped: 0 },
-												metrics: null,
-												events: { total: 0, today: 0 },
-												topContainers: [],
-												loading: env.loading
-											} as EnvironmentStats,
-											info: env,
-											loading: true
-										}));
-										tiles = newTiles;
-										dashboardData.setTiles(newTiles);
-
-										const tileIds = envList.map(env => env.id);
-										const savedLayout = $dashboardPreferences.gridLayout;
-										const newGridItems = savedLayout.length > 0
-											? mergeLayout(tileIds, savedLayout)
-											: generateDefaultLayout(tileIds);
-										gridItems = newGridItems;
-										dashboardData.setGridItems(newGridItems);
-									} else {
-										tiles = tiles.map(t => {
-											const envInfo = envList.find(e => e.id === t.id);
-											if (envInfo && t.stats) {
-												return {
-													...t,
-													stats: {
-														...t.stats,
-														port: envInfo.port,
-														collectActivity: envInfo.collectActivity ?? false,
-														collectMetrics: envInfo.collectMetrics ?? true,
-														connectionType: envInfo.connectionType || 'socket',
-														labels: envInfo.labels || [],
-														loading: envInfo.loading
-													},
-													info: envInfo,
-													loading: true
-												};
-											}
-											return t;
-										});
-									}
-								} else if (eventType === 'partial') {
-									const partialStats = data as Partial<EnvironmentStats> & { id: number };
-									const tile = tiles.find(t => t.id === partialStats.id);
-									if (tile?.stats) {
-										for (const [key, value] of Object.entries(partialStats)) {
-											if (value !== undefined && key !== 'id') {
-												const existing = (tile.stats as any)[key];
-												if (existing && typeof existing === 'object' && !Array.isArray(existing) &&
-												    value && typeof value === 'object' && !Array.isArray(value)) {
-													Object.assign(existing, value);
-												} else {
-													(tile.stats as any)[key] = value;
-												}
-											}
-										}
-									}
-									const definedStats: Partial<EnvironmentStats> = {};
-									for (const [key, value] of Object.entries(partialStats)) {
-										if (value !== undefined) {
-											(definedStats as any)[key] = value;
-										}
-									}
-									dashboardData.updateTilePartial(partialStats.id, definedStats);
-								} else if (eventType === 'stats') {
-									const stats = data as EnvironmentStats;
-									tiles = tiles.map(t =>
-										t.id === stats.id
-											? { ...t, stats, loading: false }
-											: t
-									);
-									dashboardData.updateTile(stats.id, { stats, loading: false });
-								} else if (eventType === 'complete') {
-									const { id } = data;
-									const tile = tiles.find(t => t.id === id);
-									if (tile?.stats) {
-										tile.stats.loading = undefined;
-										tile.loading = false;
-									}
-									dashboardData.updateTile(id, { loading: false });
-								} else if (eventType === 'error') {
-									const { id, error } = data;
-									tiles = tiles.map(t => {
-										if (t.id === id && t.stats) {
-											return {
-												...t,
-												stats: { ...t.stats, online: false, error, loading: undefined },
-												loading: false
-											};
-										}
-										return t;
-									});
-									dashboardData.updateTile(id, { loading: false });
-								} else if (eventType === 'done') {
-									initialLoading = false;
-									refreshing = false;
-									dashboardData.setInitialized(true);
-									// Reset the countdown after each completed refresh
-									startCountdown();
-								}
-							} catch (e) {
-								console.error('Failed to parse SSE data:', e);
-							}
-						}
-						eventType = '';
-						eventData = '';
-					}
-				}
-			}
-		} catch (error) {
-			clearTimeout(timeoutId);
-			streamConnecting = false;
-			streamConnected = false;
-
-			if (error instanceof Error && error.name === 'AbortError') {
-				if (timeoutController.signal.aborted) {
-					streamError = 'Connection timed out';
-					scheduleStreamReconnect();
-				}
-				return;
-			}
-
-			console.error('Failed to fetch dashboard stats:', error);
-			const rawError = error instanceof Error ? error.message : 'Connection failed';
-			if (rawError.includes('typo') || rawError.includes('verbose')) {
-				streamError = 'Connection failed';
-			} else if (rawError.includes('FailedToOpenSocket') || rawError.includes('ECONNREFUSED')) {
-				streamError = 'Docker not accessible';
-			} else if (rawError.includes('ECONNRESET') || rawError.includes('closed')) {
-				streamError = 'Connection lost';
-			} else {
-				streamError = 'Connection failed';
-			}
-			scheduleStreamReconnect();
-		} finally {
-			initialLoading = false;
-			refreshing = false;
-			statsStreamFetching = false;
-		}
-	}
-
-	function handleGridChange(updatedItems: GridItemLayout[]) {
-		const updatedMap = new Map(updatedItems.map(item => [item.id, item]));
-		gridItems = gridItems.map(item => {
-			const updated = updatedMap.get(item.id);
-			return updated ? { ...item, x: updated.x, y: updated.y, w: updated.w, h: updated.h } : item;
-		});
-		dashboardData.setGridItems(gridItems);
-		dashboardPreferences.setGridLayout(gridItems.map(item => ({
-			id: item.id,
-			x: item.x,
-			y: item.y,
-			w: item.w,
-			h: item.h
-		})));
-	}
-
-	function getTileById(id: number): TileItem | undefined {
-		return tiles.find(t => t.id === id);
-	}
-
-	function handleTileClick(envId: number) {
-		const tile = getTileById(envId);
-		if (tile?.stats) {
-			currentEnvironment.set({ id: envId, name: tile.stats.name });
-			goto('/containers');
-		}
-	}
-
-	function handleEventsClick(envId: number) {
-		const tile = getTileById(envId);
-		if (tile?.stats) {
-			currentEnvironment.set({ id: envId, name: tile.stats.name });
-			goto(`/activity?env=${envId}`);
-		}
-	}
-
-	function toggleLocked() {
-		locked = !locked;
-		dashboardPreferences.setLocked(locked);
-	}
-
-	function switchToListView() {
-		viewMode = 'list';
-		dashboardPreferences.setViewMode('list');
-		if (document.activeElement instanceof HTMLElement) {
-			document.activeElement.blur();
-		}
-	}
-
-	function applyAutoLayout(width: number, height: number) {
-		if (viewMode !== 'grid') {
-			viewMode = 'grid';
-			dashboardPreferences.setViewMode('grid');
-		}
-		const tileIds = tiles.map(t => t.id);
-		const newGridItems: GridItemLayout[] = [];
-
-		let x = 0;
-		let y = 0;
-
-		for (const id of tileIds) {
-			if (x + width > GRID_COLS) {
-				x = 0;
-				y += height;
-			}
-
-			newGridItems.push({
-				id,
-				x,
-				y,
-				w: width,
-				h: height
-			});
-
-			x += width;
-		}
-
-		gridItems = newGridItems;
-		dashboardData.setGridItems(newGridItems);
-		dashboardPreferences.setGridLayout(newGridItems.map(item => ({
-			id: item.id,
-			x: item.x,
-			y: item.y,
-			w: item.w,
-			h: item.h
-		})));
-
-		if (document.activeElement instanceof HTMLElement) {
-			document.activeElement.blur();
-		}
-	}
-
-	const CONTAINER_STATE_ACTIONS = ['start', 'stop', 'die', 'kill', 'restart', 'pause', 'unpause', 'create', 'destroy'];
-	const pendingRefreshes: Map<number, ReturnType<typeof setTimeout>> = new Map();
-
-	function handleRealtimeEvent(event: any) {
-		const envId = event.environmentId;
-		if (!envId) return;
-
-		tiles = tiles.map(t => {
-			if (t.id === envId && t.stats) {
-				const newEvent = {
-					container_name: event.containerName || 'unknown',
-					action: event.action,
-					timestamp: event.timestamp
-				};
-				const updatedRecentEvents = [newEvent, ...(t.stats.recentEvents || [])].slice(0, 10);
-				const isToday = new Date(event.timestamp).toDateString() === new Date().toDateString();
-
-				return {
-					...t,
-					stats: {
-						...t.stats,
-						events: {
-							total: (t.stats.events?.total || 0) + 1,
-							today: (t.stats.events?.today || 0) + (isToday ? 1 : 0)
-						},
-						recentEvents: updatedRecentEvents
-					}
-				};
-			}
-			return t;
-		});
-
-		const tile = tiles.find(t => t.id === envId);
-		if (tile?.stats) {
-			dashboardData.updateTilePartial(envId, {
-				events: tile.stats.events,
-				recentEvents: tile.stats.recentEvents
-			});
-		}
-
-		if (CONTAINER_STATE_ACTIONS.includes(event.action)) {
-			const pending = pendingRefreshes.get(envId);
-			if (pending) {
-				clearTimeout(pending);
-			}
-			pendingRefreshes.set(envId, setTimeout(() => {
-				pendingRefreshes.delete(envId);
-				refreshEnvironmentTile(envId);
-			}, 500));
-		}
-	}
-
-	async function refreshEnvironmentTile(envId: number) {
-		try {
-			const response = await fetch(`/api/dashboard/stats?env=${envId}`);
-			if (!response.ok) return;
-
-			const stats = await response.json() as EnvironmentStats;
-
-			tiles = tiles.map(t =>
-				t.id === envId
-					? { ...t, stats, loading: false }
-					: t
-			);
-			dashboardData.updateTile(envId, { stats, loading: false });
-		} catch {
-			// Ignore errors
-		}
-	}
-
-	function connectEventStream() {
-		if (eventSource) {
-			eventSource.close();
-		}
-		if (eventReconnectTimer) {
-			clearTimeout(eventReconnectTimer);
-			eventReconnectTimer = null;
-		}
-
-		eventSource = new EventSource('/api/activity/events');
-
-		eventSource.addEventListener('open', () => {
-			if (eventReconnectAttempts > 0) {
-				toast.success('Live updates reconnected');
-			}
-			eventReconnectAttempts = 0;
-		});
-
-		eventSource.addEventListener('activity', (e) => {
-			try {
-				const event = JSON.parse(e.data);
-				handleRealtimeEvent(event);
-			} catch {
-				// Ignore parse errors
-			}
-		});
-
-		eventSource.addEventListener('env_status', (e) => {
-			try {
-				const status = JSON.parse(e.data);
-				tiles = tiles.map(t => {
-					if (t.id === status.envId && t.stats) {
-						return {
-							...t,
-							stats: {
-								...t.stats,
-								online: status.online,
-								error: status.error
-							}
-						};
-					}
-					return t;
-				});
-				dashboardData.updateTilePartial(status.envId, {
-					online: status.online,
-					error: status.error
-				});
-			} catch {
-				// Ignore parse errors
-			}
-		});
-
-		eventSource.onerror = () => {
-			eventSource?.close();
-			eventSource = null;
-
-			if (eventReconnectAttempts < MAX_EVENT_RECONNECT_ATTEMPTS) {
-				if (eventReconnectAttempts === 0) {
-					toast.warning('Live updates disconnected, reconnecting...');
-				}
-				const delay = Math.min(BASE_EVENT_RECONNECT_DELAY * Math.pow(2, eventReconnectAttempts), 60000);
-				eventReconnectAttempts++;
-				eventReconnectTimer = setTimeout(connectEventStream, delay);
-			} else {
-				toast.error('Live updates failed - refresh page to retry');
-			}
-		};
-	}
-
-	let refreshInterval: ReturnType<typeof setInterval>;
-
-	function handleVisibilityChange() {
-		if (document.visibilityState === 'visible') {
-			if (eventReconnectTimer) {
-				clearTimeout(eventReconnectTimer);
-				eventReconnectTimer = null;
-			}
-			if (streamReconnectTimer) {
-				clearTimeout(streamReconnectTimer);
-				streamReconnectTimer = null;
-			}
-
-			eventReconnectAttempts = 0;
-			streamReconnectAttempts = 0;
-			streamError = null;
-
-			if (!eventSource || eventSource.readyState !== EventSource.OPEN) {
-				connectEventStream();
-			}
-
-			if (!refreshing && !streamConnecting) {
-				fetchStatsStreaming(true);
-			}
-		}
-	}
-
-	onMount(async () => {
-		document.addEventListener('visibilitychange', handleVisibilityChange);
-		document.addEventListener('resume', handleVisibilityChange);
-
-		loadLabelFilter();
-		labelColorOverrides.load();
-
-		await dashboardPreferences.load();
-
-		const cachedData = dashboardData.getData();
-		if (cachedData.tiles.length > 0 && cachedData.initialized) {
-			tiles = cachedData.tiles;
-			gridItems = cachedData.gridItems;
-			initialLoading = false;
-			environmentsLoaded = true;
-			fetchStatsStreaming(true);
-		} else {
-			await fetchStatsStreaming();
-		}
-
-		connectEventStream();
-
-		// Auto-refresh every 30s; countdown resets after each completed 'done' event
-		refreshInterval = setInterval(() => {
-			fetchStatsStreaming(true);
-			startCountdown();
-		}, REFRESH_INTERVAL_MS);
-		startCountdown();
-	});
-
-	onDestroy(() => {
-		document.removeEventListener('visibilitychange', handleVisibilityChange);
-		document.removeEventListener('resume', handleVisibilityChange);
-
-		if (abortController) {
-			abortController.abort();
-		}
-		if (streamReconnectTimer) {
-			clearTimeout(streamReconnectTimer);
-			streamReconnectTimer = null;
-		}
-		if (eventReconnectTimer) {
-			clearTimeout(eventReconnectTimer);
-			eventReconnectTimer = null;
-		}
-		if (eventSource) {
-			eventSource.close();
-			eventSource = null;
-		}
-		for (const timeout of pendingRefreshes.values()) {
-			clearTimeout(timeout);
-		}
-		pendingRefreshes.clear();
-		if (refreshInterval) {
-			clearInterval(refreshInterval);
-		}
-		if (countdownInterval) {
-			clearInterval(countdownInterval);
-		}
-		unsubscribeDashboardData();
-		unsubscribePrefs();
-		mobileWatcher.destroy();
-	});
+	onMount(() => { fetchAll(); startCycle(); });
+	onDestroy(() => { clearInterval(countdownInterval); });
 </script>
 
-<div class="flex flex-col gap-4 h-full overflow-auto pb-4">
-	<!-- Header -->
-	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
-		<div class="flex items-center gap-4">
-			<PageHeader icon={LayoutGrid} title="Environments" count={tiles.length} />
+<div class="flex-1 flex flex-col gap-4 min-h-0">
 
-			<!-- Label filter toggles -->
-			{#if allLabels.length > 0}
-				<div class="flex items-center gap-1.5">
-					<button
-						type="button"
-						class="px-2.5 py-1 text-xs font-medium rounded transition-colors {filterLabels.length === 0
-							? 'bg-primary text-primary-foreground'
-							: 'bg-muted text-muted-foreground hover:bg-muted/80'}"
-						onclick={() => filterLabels = []}
-					>
-						All
-					</button>
-					{#each allLabels as label}
-						{@const isSelected = filterLabels.includes(label)}
-						<button
-							type="button"
-							class="px-2.5 py-1 text-xs font-medium rounded transition-colors border"
-							style={isSelected
-								? `background-color: ${getLabelBgColor(label, $labelColorOverrides)}; border-color: ${getLabelColor(label, $labelColorOverrides)}; color: ${getLabelColor(label, $labelColorOverrides)};`
-								: `background-color: transparent; border-color: hsl(var(--border)); color: hsl(var(--muted-foreground));`}
-							onclick={() => toggleLabel(label)}
-						>
-							{label}
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
-
-		<div class="flex items-center gap-1">
-			<!-- List view filters -->
-			{#if viewMode === 'list'}
-				<div class="flex items-center gap-2 mr-2">
-					<div class="relative">
-						<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-						<Input
-							type="text"
-							placeholder="Search environments..."
-							bind:value={listSearchQuery}
-							onkeydown={(e) => e.key === 'Escape' && (listSearchQuery = '')}
-							class="pl-8 h-8 w-52 text-sm"
-						/>
-					</div>
-					<MultiSelectFilter
-						bind:value={listConnectionFilter}
-						options={connectionOptions}
-						placeholder="All connections"
-						pluralLabel="connections"
-						width="w-48"
-						defaultIcon={Plug}
-					/>
-					{#if listSearchQuery || listConnectionFilter.length > 0}
-						<span class="text-xs text-muted-foreground whitespace-nowrap">{listFilteredCount} of {filteredTiles.length}</span>
-					{/if}
-				</div>
-			{/if}
-
-			<!-- Add environment button -->
-			<button
-				onclick={() => goto('/settings?tab=environments&new=true')}
-				class="p-1.5 rounded hover:bg-muted transition-colors"
-				title="Add environment"
-			>
-				<Plus class="w-4 h-4" />
-			</button>
-
-			<!-- Lock toggle (grid view only) -->
-			{#if viewMode === 'grid'}
-				<button
-					onclick={toggleLocked}
-					class="p-1.5 rounded hover:bg-muted transition-colors"
-					title={locked ? 'Unlock tiles' : 'Lock tiles'}
-				>
-					{#if locked}
-						<Lock class="w-4 h-4 text-primary" />
-					{:else}
-						<LockOpen class="w-4 h-4" />
-					{/if}
-				</button>
-			{/if}
-
-			<!-- Autolayout dropdown -->
-			<DropdownMenu.Root>
-				<DropdownMenu.Trigger>
-					{#snippet child({ props })}
-						<button
-							{...props}
-							class="p-1.5 rounded hover:bg-muted transition-colors"
-							title="Layout options"
-						>
-							<LayoutTemplate class="w-4 h-4" />
-						</button>
-					{/snippet}
-				</DropdownMenu.Trigger>
-				<DropdownMenu.Content align="end" class="w-36">
-					<DropdownMenu.Item onclick={() => applyAutoLayout(1, 1)} class="flex items-center gap-2 cursor-pointer">
-						<Square class="w-4 h-4" />
-						<span>Compact</span>
-					</DropdownMenu.Item>
-					<DropdownMenu.Item onclick={() => applyAutoLayout(1, 2)} class="flex items-center gap-2 cursor-pointer">
-						<RectangleVertical class="w-4 h-4" />
-						<span>Standard</span>
-					</DropdownMenu.Item>
-					<DropdownMenu.Item onclick={() => applyAutoLayout(1, 4)} class="flex items-center gap-2 cursor-pointer">
-						<Rows3 class="w-4 h-4" />
-						<span>Detailed</span>
-					</DropdownMenu.Item>
-					<DropdownMenu.Item onclick={() => applyAutoLayout(2, 4)} class="flex items-center gap-2 cursor-pointer">
-						<Maximize2 class="w-4 h-4" />
-						<span>Full</span>
-					</DropdownMenu.Item>
-					<DropdownMenu.Separator />
-					<DropdownMenu.Item onclick={switchToListView} class="flex items-center gap-2 cursor-pointer">
-						<List class="w-4 h-4" />
-						<span>List</span>
-					</DropdownMenu.Item>
-				</DropdownMenu.Content>
-			</DropdownMenu.Root>
-
-			<!-- Refresh button with countdown -->
-			<button
-				onclick={() => { fetchStatsStreaming(true); startCountdown(); }}
-				class="flex items-center gap-1 px-1.5 py-1 rounded hover:bg-muted transition-colors text-xs"
-				title="Refresh (auto-refreshes every 30s)"
-				disabled={refreshing}
-			>
-				<RefreshCw class="w-4 h-4 {refreshing ? 'animate-spin' : ''}" />
-				{#if !refreshing}
-					<span class="tabular-nums text-muted-foreground w-5 text-right">{refreshCountdown}s</span>
-				{/if}
-			</button>
-		</div>
+	<!-- Header row -->
+	<div class="shrink-0 flex items-center justify-between gap-3">
+		<PageHeader icon={RefreshCw} title="Dashboard" showConnection={false} />
+		<span class="text-xs text-muted-foreground tabular-nums flex items-center gap-1.5">
+			<RefreshCw class="w-3 h-3 opacity-40" />
+			{refreshCountdown}s
+		</span>
 	</div>
 
-	<!-- Initial loading state -->
-	{#if !environmentsLoaded && tiles.length === 0}
-		<div class="flex items-center justify-center gap-2 text-muted-foreground py-8">
-			<Loader2 class="w-5 h-5 animate-spin text-primary" />
-			<span class="text-sm">Loading environments...</span>
-		</div>
-	{:else if tiles.length === 0 && environmentsLoaded && $environments.length === 0}
-		<!-- No environments -->
-		<div class="flex flex-col items-center justify-center h-64 text-muted-foreground">
-			<div class="w-16 h-16 mb-4 rounded-2xl border-2 border-dashed border-muted-foreground/30 flex items-center justify-center">
-				<Server class="w-8 h-8 opacity-40" />
-			</div>
-			<p class="text-lg font-medium text-foreground/70">No environments configured</p>
-			<p class="text-sm text-muted-foreground mb-4">Add an environment to start managing your Docker hosts</p>
-			<Button variant="outline" size="sm" onclick={() => goto('/settings?tab=environments')}>
-				Go to Settings
-			</Button>
-		</div>
-	{:else if viewMode === 'list'}
-		<!-- List view -->
-		<EnvironmentListView
-			tiles={filteredTiles}
-			searchQuery={listSearchQuery}
-			connectionFilter={listConnectionFilter}
-			onrowclick={handleTileClick}
-		/>
-	{:else if filteredGridItems.length === 0}
-		<!-- Filter shows no results -->
-		<div class="flex flex-col items-center justify-center h-64 text-muted-foreground">
-			<div class="w-16 h-16 mb-4 rounded-2xl border-2 border-dashed border-muted-foreground/30 flex items-center justify-center">
-				<Tags class="w-8 h-8 opacity-40" />
-			</div>
-			<p class="text-lg font-medium text-foreground/70">No matching environments</p>
-			<p class="text-sm text-muted-foreground mb-4">No environments match the selected label filters</p>
-			<Button variant="outline" size="sm" onclick={() => filterLabels = []}>
-				Clear filters
-			</Button>
-		</div>
-	{:else}
-		{#if isMobile}
-			<div class="flex flex-col gap-3">
-				{#each orderedGridItems as item (item.id)}
-					{@const tile = getTileById(item.id)}
-					{#if tile}
-						{#if tile.loading && !tile.stats}
-							<div class="w-full">
-								<EnvironmentTileSkeleton
-									name={tile.info?.name}
-									host={tile.info?.host}
-									width={2}
-									height={Math.max(item.h, 2)}
-								/>
-							</div>
-						{:else if tile.stats}
-							<div class="w-full cursor-pointer" onclick={() => handleTileClick(tile.stats!.id)}>
-								<EnvironmentTile
-									stats={tile.stats}
-									width={2}
-									height={Math.max(item.h, 2)}
-									oneventsclick={() => handleEventsClick(tile.stats!.id)}
-									showStacksBreakdown={false}
-								/>
-							</div>
-						{/if}
-					{/if}
-				{/each}
-			</div>
-		{:else}
-			<DraggableGrid
-				items={filteredGridItems}
-				{locked}
-				onchange={handleGridChange}
+	<!-- Service cards -->
+	<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+		{#each cards as card}
+			<a
+				href={card.href}
+				class="group rounded-xl border bg-card hover:bg-muted/30 transition-colors p-5 flex flex-col gap-4 shadow-sm no-underline"
 			>
-				{#snippet item(gridItem)}
-					{@const tile = getTileById(gridItem.id)}
-					{#if tile}
-						{#if tile.loading && !tile.stats}
-							<EnvironmentTileSkeleton
-								name={tile.info?.name}
-								host={tile.info?.host}
-								width={gridItem.w}
-								height={gridItem.h}
-							/>
-						{:else if tile.stats}
-							<div class="h-full cursor-pointer" onclick={() => handleTileClick(tile.stats!.id)}>
-								<EnvironmentTile
-									stats={tile.stats}
-									width={gridItem.w}
-									height={gridItem.h}
-									oneventsclick={() => handleEventsClick(tile.stats!.id)}
-									showStacksBreakdown={gridItem.w >= 2 && gridItem.h >= 3}
-								/>
-							</div>
-						{/if}
+				<!-- Card title + status icon -->
+				<div class="flex items-center justify-between">
+					<div class="flex items-center gap-2 text-sm font-semibold">
+						<card.Icon class="w-4 h-4 text-muted-foreground" aria-hidden="true" />
+						{card.title}
+					</div>
+					{#if card.loading}
+						<RefreshCw class="w-3.5 h-3.5 text-muted-foreground animate-spin" />
+					{:else if card.error}
+						<XCircle class="w-4 h-4 text-destructive/70" />
+					{:else}
+						<CheckCircle2 class="w-4 h-4 text-emerald-500" />
 					{/if}
-				{/snippet}
-			</DraggableGrid>
-		{/if}
-	{/if}
+				</div>
+
+				<!-- Stat rows -->
+				{#if card.loading}
+					<div class="flex flex-col gap-2.5">
+						<div class="h-3.5 w-2/3 rounded bg-muted animate-pulse"></div>
+						<div class="h-3 w-1/2 rounded bg-muted animate-pulse"></div>
+					</div>
+				{:else if card.error}
+					<div class="flex items-start gap-1.5 text-xs text-destructive/80">
+						<AlertCircle class="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden="true" />
+						<span class="leading-snug">{card.error}</span>
+					</div>
+				{:else if card.rows.length === 0}
+					<p class="text-xs text-muted-foreground italic">No data</p>
+				{:else}
+					<div class="flex flex-col gap-3.5">
+						{#each card.rows as row}
+							<div class="flex items-start justify-between gap-3">
+								<div class="flex flex-col gap-0.5 min-w-0">
+									<span class="text-xs text-muted-foreground">{row.label}</span>
+									<span class="text-sm font-semibold tabular-nums truncate">{row.value}</span>
+									{#if row.sub}
+										<span class="text-xs text-muted-foreground">{row.sub}</span>
+									{/if}
+								</div>
+								{#if row.ok === true}
+									<CheckCircle2 class="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" aria-hidden="true" />
+								{:else if row.ok === false}
+									<XCircle class="w-4 h-4 text-destructive/70 shrink-0 mt-0.5" aria-hidden="true" />
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</a>
+		{/each}
+	</div>
 </div>
