@@ -63,11 +63,14 @@
 		compact = false
 	}: Props = $props();
 
-	// Format host with port for display
+	// Format host with port for display.
+	// For direct connections the host field may be 'dhcp' when the LXC obtains its
+	// address dynamically — in that case show a friendly label instead of the raw string.
 	const hostDisplay = $derived(
 		connectionType === 'socket' ? (socketPath || '/var/run/docker.sock') :
 		connectionType === 'hawser-edge' ? 'Edge connection' :
-		(port ? `${host}:${port}` : host || 'Unknown host')
+		(host === 'dhcp' || host === undefined || host === null || host === '') ? 'DHCP (dynamic)' :
+		(port ? `${host}:${port}` : host)
 	);
 
 	const canEdit = $derived($canAccess('environments', 'edit'));

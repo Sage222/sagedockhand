@@ -26,6 +26,7 @@
 	import { appSettings } from '$lib/stores/settings';
 
 	const LABEL_FILTER_STORAGE_KEY = 'dockhand-dashboard-label-filter';
+	const REFRESH_INTERVAL_MS = 30000;
 
 	// Real-time event stream for immediate updates
 	let eventSource: EventSource | null = null;
@@ -51,7 +52,7 @@
 	let tiles = $state<TileItem[]>([]);
 	let gridItems = $state<GridItemLayout[]>([]);
 	let initialLoading = $state(true);
-	let environmentsLoaded = $state(false); // Tracks if environments were ever received (prevents false "no environments" message)
+	let environmentsLoaded = $state(false);
 	let refreshing = $state(false);
 	let prefsLoaded = $state(false);
 	const mobileWatcher = new IsMobile();
@@ -60,6 +61,18 @@
 	// Dashboard lock and view mode from preferences
 	let locked = $state(false);
 	let viewMode = $state<'grid' | 'list'>('grid');
+
+	// Countdown to next auto-refresh (seconds)
+	let refreshCountdown = $state(REFRESH_INTERVAL_MS / 1000);
+	let countdownInterval: ReturnType<typeof setInterval> | null = null;
+
+	function startCountdown() {
+		if (countdownInterval) clearInterval(countdownInterval);
+		refreshCountdown = REFRESH_INTERVAL_MS / 1000;
+		countdownInterval = setInterval(() => {
+			refreshCountdown = Math.max(0, refreshCountdown - 1);
+		}, 1000);
+	}
 
 	// List view filter state
 	let listSearchQuery = $state('');
@@ -93,16 +106,11 @@
 		return result.length;
 	});
 
-	// Subscribe to environments store's loaded flag for quick "loaded" detection
-	// When loaded, immediately create skeleton tiles so the UI shows something useful
-	// The SSE stream will then update these tiles with real stats
 	$effect(() => {
 		const unsubscribe = environments.loaded.subscribe(loaded => {
 			if (loaded) {
 				environmentsLoaded = true;
 
-				// Create skeleton tiles immediately from the fast environments store
-				// This avoids waiting for the slower SSE stream to show initial UI
 				const envList = $environments;
 				if (tiles.length === 0 && envList.length > 0) {
 					const skeletonTiles = envList.map(env => ({
@@ -137,7 +145,6 @@
 					}));
 					tiles = skeletonTiles;
 
-					// Generate grid layout for these tiles
 					const savedLayout = $dashboardPreferences.gridLayout;
 					const tileIds = envList.map(env => env.id);
 					const newGridItems = savedLayout.length > 0
@@ -150,11 +157,10 @@
 		return unsubscribe;
 	});
 
-	// Label filtering - load from localStorage
+	// Label filtering
 	let filterLabels = $state<string[]>([]);
 	let labelFilterLoaded = $state(false);
 
-	// Load saved label filter from localStorage
 	function loadLabelFilter() {
 		if (browser) {
 			try {
@@ -169,14 +175,12 @@
 		}
 	}
 
-	// Save label filter to localStorage when it changes
 	$effect(() => {
 		if (browser && labelFilterLoaded) {
 			localStorage.setItem(LABEL_FILTER_STORAGE_KEY, JSON.stringify(filterLabels));
 		}
 	});
 
-	// Toggle a label in the filter
 	function toggleLabel(label: string) {
 		if (filterLabels.includes(label)) {
 			filterLabels = filterLabels.filter(l => l !== label);
@@ -185,7 +189,6 @@
 		}
 	}
 
-	// Compute all unique labels from all tiles
 	const allLabels = $derived.by(() => {
 		const labelSet = new Set<string>();
 		for (const tile of tiles) {
@@ -197,7 +200,6 @@
 		return Array.from(labelSet).sort();
 	});
 
-	// Validate filterLabels - remove any that don't exist in allLabels
 	$effect(() => {
 		if (labelFilterLoaded && filterLabels.length > 0 && tiles.length > 0) {
 			const validLabels = filterLabels.filter(l => allLabels.includes(l));
@@ -207,7 +209,6 @@
 		}
 	});
 
-	// Filter tiles for list view based on selected labels
 	const filteredTiles = $derived.by(() => {
 		if (filterLabels.length === 0) {
 			return tiles;
@@ -218,7 +219,6 @@
 		return tiles.filter(t => matchFn(t.stats?.labels || []));
 	});
 
-	// Filter grid items based on selected labels
 	const filteredGridItems = $derived.by(() => {
 		if (filterLabels.length === 0) {
 			return gridItems;
@@ -235,25 +235,20 @@
 		return [...filteredGridItems].sort((a, b) => (a.y - b.y) || (a.x - b.x));
 	});
 
-	// AbortController for SSE stream cleanup
 	let abortController: AbortController | null = null;
 
-	// Stream connection status
 	let streamConnected = $state(false);
 	let streamConnecting = $state(false);
 	let streamError = $state<string | null>(null);
 
-	// Stats stream reconnection
-	const STREAM_CONNECT_TIMEOUT = 30000; // 30 seconds
+	const STREAM_CONNECT_TIMEOUT = 30000;
 	const MAX_STREAM_RECONNECT_ATTEMPTS = 5;
 	const INITIAL_STREAM_RECONNECT_DELAY = 3000;
 	let streamReconnectAttempts = 0;
 	let streamReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-	// Track previous initialized state to detect changes
 	let wasInitialized = true;
 
-	// Subscribe to dashboard data store for cached data
 	const unsubscribeDashboardData = dashboardData.subscribe(data => {
 		if (data.tiles.length > 0) {
 			tiles = data.tiles;
@@ -261,19 +256,16 @@
 		if (data.gridItems.length > 0) {
 			gridItems = data.gridItems;
 		}
-		// If cache was just invalidated (transition from true to false), trigger a refresh
 		if (wasInitialized && !data.initialized && data.tiles.length > 0 && !refreshing) {
 			fetchStatsStreaming(true);
 		}
 		wasInitialized = data.initialized;
 	});
 
-	// Subscribe to preferences store to load saved layout
 	const unsubscribePrefs = dashboardPreferences.subscribe(prefs => {
 		locked = prefs.locked;
 		viewMode = prefs.viewMode;
 		if (prefs.gridLayout.length > 0 && tiles.length > 0 && !prefsLoaded) {
-			// Apply saved layout
 			gridItems = prefs.gridLayout.map(item => ({
 				...item,
 				id: item.id
@@ -282,8 +274,6 @@
 		}
 	});
 
-	// Generate default grid layout for tiles
-	// Default height of 2 shows standard content (CPU/mem, resources, events)
 	function generateDefaultLayout(tileIds: number[]): GridItemLayout[] {
 		return tileIds.map((id, index) => ({
 			id,
@@ -294,22 +284,18 @@
 		}));
 	}
 
-	// Merge new tiles with existing layout
 	function mergeLayout(tileIds: number[], existingLayout: GridItemLayout[]): GridItemLayout[] {
 		const result: GridItemLayout[] = [];
 
-		// Keep existing items in their positions
 		for (const item of existingLayout) {
 			if (tileIds.includes(item.id)) {
 				result.push(item);
 			}
 		}
 
-		// Add new tiles that don't have positions
 		const existingIds = new Set(existingLayout.map(item => item.id));
 		const newIds = tileIds.filter(id => !existingIds.has(id));
 
-		// Find next available position for new items
 		let nextY = result.length > 0 ? Math.max(...result.map(item => item.y + item.h)) : 0;
 		let nextX = 0;
 
@@ -331,7 +317,6 @@
 		return result;
 	}
 
-	// Schedule stream reconnection with exponential backoff
 	function scheduleStreamReconnect() {
 		if (streamReconnectTimer) {
 			clearTimeout(streamReconnectTimer);
@@ -350,7 +335,6 @@
 		}, delay);
 	}
 
-	// Reset stream reconnection state
 	function resetStreamReconnect() {
 		streamReconnectAttempts = 0;
 		if (streamReconnectTimer) {
@@ -362,39 +346,32 @@
 	let statsStreamFetching = false;
 
 	async function fetchStatsStreaming(isRefresh = false) {
-		// Skip if previous fetch is still in-flight
 		if (statsStreamFetching) return;
 
-		// Abort any previous streaming request
 		if (abortController) {
 			abortController.abort();
 		}
 		abortController = new AbortController();
 		statsStreamFetching = true;
 
-		// Set up connection timeout
 		const timeoutController = new AbortController();
 		const timeoutId = setTimeout(() => {
 			timeoutController.abort();
 		}, STREAM_CONNECT_TIMEOUT);
 
-		// Update connection status
 		streamConnecting = true;
 		streamError = null;
 
 		if (isRefresh) {
 			refreshing = true;
-			// Mark all existing tiles as refreshing but keep their data
 			tiles = tiles.map(t => ({ ...t, loading: true }));
 			dashboardData.markAllLoading();
 		} else {
-			// Only show initial loading if we have no cached data
 			const cachedData = dashboardData.getData();
 			if (cachedData.tiles.length === 0) {
 				initialLoading = true;
 				tiles = [];
 			} else {
-				// We have cached data - do a background refresh
 				refreshing = true;
 				dashboardData.markAllLoading();
 			}
@@ -411,7 +388,6 @@
 				throw new Error(`HTTP ${response.status}`);
 			}
 
-			// Connection established
 			streamConnected = true;
 			streamConnecting = false;
 			resetStreamReconnect();
@@ -444,13 +420,10 @@
 								const data = JSON.parse(eventData);
 
 								if (eventType === 'environments') {
-									// Mark that we've received environment data (prevents false "no environments" message)
 									environmentsLoaded = true;
-									// Create tiles for each environment with initial loading state
 									const envList = data as (EnvironmentInfo & { loading?: EnvironmentStats['loading'] })[];
 									const cachedData = dashboardData.getData();
 
-									// Only reset tiles if we had no cached data
 									if (cachedData.tiles.length === 0) {
 										const newTiles = envList.map(env => ({
 											id: env.id,
@@ -466,7 +439,7 @@
 												connectionType: env.connectionType || 'socket',
 												labels: env.labels || [],
 												scannerEnabled: false,
-												online: undefined, // undefined = connecting, false = offline, true = online
+												online: undefined,
 												containers: { total: 0, running: 0, stopped: 0, paused: 0, restarting: 0, unhealthy: 0, pendingUpdates: 0 },
 												images: { total: 0, totalSize: 0 },
 												volumes: { total: 0, totalSize: 0 },
@@ -485,7 +458,6 @@
 										tiles = newTiles;
 										dashboardData.setTiles(newTiles);
 
-										// Generate or merge grid layout
 										const tileIds = envList.map(env => env.id);
 										const savedLayout = $dashboardPreferences.gridLayout;
 										const newGridItems = savedLayout.length > 0
@@ -494,8 +466,6 @@
 										gridItems = newGridItems;
 										dashboardData.setGridItems(newGridItems);
 									} else {
-										// Set loading states on existing tiles for refresh
-										// Also update collectActivity, collectMetrics, connectionType, labels, and port from fresh data
 										tiles = tiles.map(t => {
 											const envInfo = envList.find(e => e.id === t.id);
 											if (envInfo && t.stats) {
@@ -518,17 +488,12 @@
 										});
 									}
 								} else if (eventType === 'partial') {
-									// Progressive update - merge partial data into existing stats
-									// Use deep merge for nested objects to preserve existing values
 									const partialStats = data as Partial<EnvironmentStats> & { id: number };
 									const tile = tiles.find(t => t.id === partialStats.id);
 									if (tile?.stats) {
-										// Use direct mutation for Svelte 5 reactivity
-										// Deep merge for nested objects like containers, images, etc.
 										for (const [key, value] of Object.entries(partialStats)) {
 											if (value !== undefined && key !== 'id') {
 												const existing = (tile.stats as any)[key];
-												// Deep merge for plain objects (not arrays or null)
 												if (existing && typeof existing === 'object' && !Array.isArray(existing) &&
 												    value && typeof value === 'object' && !Array.isArray(value)) {
 													Object.assign(existing, value);
@@ -538,7 +503,6 @@
 											}
 										}
 									}
-									// Also update the store with deep merge
 									const definedStats: Partial<EnvironmentStats> = {};
 									for (const [key, value] of Object.entries(partialStats)) {
 										if (value !== undefined) {
@@ -547,7 +511,6 @@
 									}
 									dashboardData.updateTilePartial(partialStats.id, definedStats);
 								} else if (eventType === 'stats') {
-									// Update the tile with actual stats (legacy/fallback)
 									const stats = data as EnvironmentStats;
 									tiles = tiles.map(t =>
 										t.id === stats.id
@@ -556,20 +519,15 @@
 									);
 									dashboardData.updateTile(stats.id, { stats, loading: false });
 								} else if (eventType === 'complete') {
-									// Environment fully loaded - clear loading states
 									const { id } = data;
 									const tile = tiles.find(t => t.id === id);
 									if (tile?.stats) {
-										// Use direct mutation for Svelte 5 reactivity
 										tile.stats.loading = undefined;
 										tile.loading = false;
 									}
 									dashboardData.updateTile(id, { loading: false });
 								} else if (eventType === 'error') {
-									// Per-environment error
 									const { id, error } = data;
-
-									// Update tile to show offline state
 									tiles = tiles.map(t => {
 										if (t.id === id && t.stats) {
 											return {
@@ -585,6 +543,8 @@
 									initialLoading = false;
 									refreshing = false;
 									dashboardData.setInitialized(true);
+									// Reset the countdown after each completed refresh
+									startCountdown();
 								}
 							} catch (e) {
 								console.error('Failed to parse SSE data:', e);
@@ -595,17 +555,12 @@
 					}
 				}
 			}
-
-			// Stream ended normally - keep connected status since we have data
-			// (dashboard stream is one-shot, not persistent like EventSource)
 		} catch (error) {
 			clearTimeout(timeoutId);
 			streamConnecting = false;
 			streamConnected = false;
 
-			// Ignore abort errors from our own abortController - these are intentional
 			if (error instanceof Error && error.name === 'AbortError') {
-				// Check if this was a timeout (from timeoutController) vs intentional abort
 				if (timeoutController.signal.aborted) {
 					streamError = 'Connection timed out';
 					scheduleStreamReconnect();
@@ -614,7 +569,6 @@
 			}
 
 			console.error('Failed to fetch dashboard stats:', error);
-			// Convert technical errors to user-friendly messages
 			const rawError = error instanceof Error ? error.message : 'Connection failed';
 			if (rawError.includes('typo') || rawError.includes('verbose')) {
 				streamError = 'Connection failed';
@@ -633,17 +587,13 @@
 		}
 	}
 
-	// Handle grid item changes (position or size)
 	function handleGridChange(updatedItems: GridItemLayout[]) {
-		// When filtering is active, merge updated positions back into full gridItems
-		// This preserves positions of hidden tiles
 		const updatedMap = new Map(updatedItems.map(item => [item.id, item]));
 		gridItems = gridItems.map(item => {
 			const updated = updatedMap.get(item.id);
 			return updated ? { ...item, x: updated.x, y: updated.y, w: updated.w, h: updated.h } : item;
 		});
 		dashboardData.setGridItems(gridItems);
-		// Save the new layout (convert to store format)
 		dashboardPreferences.setGridLayout(gridItems.map(item => ({
 			id: item.id,
 			x: item.x,
@@ -653,12 +603,10 @@
 		})));
 	}
 
-	// Get tile by id
 	function getTileById(id: number): TileItem | undefined {
 		return tiles.find(t => t.id === id);
 	}
 
-	// Handle tile click - select environment and navigate to containers
 	function handleTileClick(envId: number) {
 		const tile = getTileById(envId);
 		if (tile?.stats) {
@@ -667,7 +615,6 @@
 		}
 	}
 
-	// Handle events section click - select environment and navigate to activity
 	function handleEventsClick(envId: number) {
 		const tile = getTileById(envId);
 		if (tile?.stats) {
@@ -684,15 +631,12 @@
 	function switchToListView() {
 		viewMode = 'list';
 		dashboardPreferences.setViewMode('list');
-		// Remove focus from trigger button
 		if (document.activeElement instanceof HTMLElement) {
 			document.activeElement.blur();
 		}
 	}
 
-	// Apply autolayout - arrange all tiles with specified dimensions
 	function applyAutoLayout(width: number, height: number) {
-		// Switch to grid view when selecting a grid layout
 		if (viewMode !== 'grid') {
 			viewMode = 'grid';
 			dashboardPreferences.setViewMode('grid');
@@ -704,7 +648,6 @@
 		let y = 0;
 
 		for (const id of tileIds) {
-			// Check if tile fits in current row
 			if (x + width > GRID_COLS) {
 				x = 0;
 				y += height;
@@ -731,24 +674,18 @@
 			h: item.h
 		})));
 
-		// Remove focus from trigger button
 		if (document.activeElement instanceof HTMLElement) {
 			document.activeElement.blur();
 		}
 	}
 
-	// Actions that affect container counts and should trigger a refresh
 	const CONTAINER_STATE_ACTIONS = ['start', 'stop', 'die', 'kill', 'restart', 'pause', 'unpause', 'create', 'destroy'];
-
-	// Debounce refresh per environment to avoid hammering the API
 	const pendingRefreshes: Map<number, ReturnType<typeof setTimeout>> = new Map();
 
-	// Handle real-time container events for immediate dashboard updates
 	function handleRealtimeEvent(event: any) {
 		const envId = event.environmentId;
 		if (!envId) return;
 
-		// Update the tile's event counts and recent events list immediately
 		tiles = tiles.map(t => {
 			if (t.id === envId && t.stats) {
 				const newEvent = {
@@ -756,11 +693,7 @@
 					action: event.action,
 					timestamp: event.timestamp
 				};
-
-				// Add to recent events (keep max 10, newest first)
 				const updatedRecentEvents = [newEvent, ...(t.stats.recentEvents || [])].slice(0, 10);
-
-				// Increment event counts
 				const isToday = new Date(event.timestamp).toDateString() === new Date().toDateString();
 
 				return {
@@ -778,7 +711,6 @@
 			return t;
 		});
 
-		// Also update the store
 		const tile = tiles.find(t => t.id === envId);
 		if (tile?.stats) {
 			dashboardData.updateTilePartial(envId, {
@@ -787,15 +719,11 @@
 			});
 		}
 
-		// If this is a container state change, trigger a debounced refresh for the full tile
 		if (CONTAINER_STATE_ACTIONS.includes(event.action)) {
-			// Cancel any pending refresh for this environment
 			const pending = pendingRefreshes.get(envId);
 			if (pending) {
 				clearTimeout(pending);
 			}
-
-			// Schedule a refresh after 500ms to batch rapid events
 			pendingRefreshes.set(envId, setTimeout(() => {
 				pendingRefreshes.delete(envId);
 				refreshEnvironmentTile(envId);
@@ -803,7 +731,6 @@
 		}
 	}
 
-	// Refresh a single environment tile
 	async function refreshEnvironmentTile(envId: number) {
 		try {
 			const response = await fetch(`/api/dashboard/stats?env=${envId}`);
@@ -818,11 +745,10 @@
 			);
 			dashboardData.updateTile(envId, { stats, loading: false });
 		} catch {
-			// Ignore errors - next full refresh will catch up
+			// Ignore errors
 		}
 	}
 
-	// Connect to real-time event stream
 	function connectEventStream() {
 		if (eventSource) {
 			eventSource.close();
@@ -835,11 +761,10 @@
 		eventSource = new EventSource('/api/activity/events');
 
 		eventSource.addEventListener('open', () => {
-			// Show reconnection success toast if we were reconnecting
 			if (eventReconnectAttempts > 0) {
 				toast.success('Live updates reconnected');
 			}
-			eventReconnectAttempts = 0; // Reset backoff on successful connection
+			eventReconnectAttempts = 0;
 		});
 
 		eventSource.addEventListener('activity', (e) => {
@@ -851,11 +776,9 @@
 			}
 		});
 
-		// Handle environment status changes (online/offline)
 		eventSource.addEventListener('env_status', (e) => {
 			try {
 				const status = JSON.parse(e.data);
-				// Update tile online status
 				tiles = tiles.map(t => {
 					if (t.id === status.envId && t.stats) {
 						return {
@@ -882,13 +805,10 @@
 			eventSource?.close();
 			eventSource = null;
 
-			// Exponential backoff reconnection
 			if (eventReconnectAttempts < MAX_EVENT_RECONNECT_ATTEMPTS) {
-				// Show toast only on first disconnect
 				if (eventReconnectAttempts === 0) {
 					toast.warning('Live updates disconnected, reconnecting...');
 				}
-
 				const delay = Math.min(BASE_EVENT_RECONNECT_DELAY * Math.pow(2, eventReconnectAttempts), 60000);
 				eventReconnectAttempts++;
 				eventReconnectTimer = setTimeout(connectEventStream, delay);
@@ -900,12 +820,8 @@
 
 	let refreshInterval: ReturnType<typeof setInterval>;
 
-	// Handle tab visibility changes (e.g., user switches back from another tab)
 	function handleVisibilityChange() {
 		if (document.visibilityState === 'visible') {
-			// Tab became visible - check and restore connections
-
-			// Clear any pending reconnection timers
 			if (eventReconnectTimer) {
 				clearTimeout(eventReconnectTimer);
 				eventReconnectTimer = null;
@@ -915,18 +831,14 @@
 				streamReconnectTimer = null;
 			}
 
-			// Reset reconnection counters to give fresh attempts
 			eventReconnectAttempts = 0;
 			streamReconnectAttempts = 0;
 			streamError = null;
 
-			// Reconnect event stream if it's closed or in error state
 			if (!eventSource || eventSource.readyState !== EventSource.OPEN) {
 				connectEventStream();
 			}
 
-			// Trigger a stats refresh if we haven't refreshed recently
-			// (the 30s interval may have been paused while backgrounded)
 			if (!refreshing && !streamConnecting) {
 				fetchStatsStreaming(true);
 			}
@@ -934,56 +846,46 @@
 	}
 
 	onMount(async () => {
-		// Listen for tab visibility changes to reconnect when user returns
 		document.addEventListener('visibilitychange', handleVisibilityChange);
-		// Chrome 77+ Page Lifecycle API - fires when frozen tab is resumed
 		document.addEventListener('resume', handleVisibilityChange);
 
-		// Load label filter and custom label colors
 		loadLabelFilter();
 		labelColorOverrides.load();
 
-		// Load preferences first
 		await dashboardPreferences.load();
 
-		// Check if we have valid cached data (not invalidated)
 		const cachedData = dashboardData.getData();
 		if (cachedData.tiles.length > 0 && cachedData.initialized) {
-			// Use cached data immediately
 			tiles = cachedData.tiles;
 			gridItems = cachedData.gridItems;
 			initialLoading = false;
 			environmentsLoaded = true;
-
-			// Then refresh in background
 			fetchStatsStreaming(true);
 		} else {
-			// No cache or cache invalidated - do initial fetch
 			await fetchStatsStreaming();
 		}
 
-		// Connect to real-time event stream for immediate updates
 		connectEventStream();
 
-		// Refresh stats every 30 seconds
-		refreshInterval = setInterval(() => fetchStatsStreaming(true), 30000);
+		// Auto-refresh every 30s; countdown resets after each completed 'done' event
+		refreshInterval = setInterval(() => {
+			fetchStatsStreaming(true);
+			startCountdown();
+		}, REFRESH_INTERVAL_MS);
+		startCountdown();
 	});
 
 	onDestroy(() => {
-		// Remove visibility change listeners
 		document.removeEventListener('visibilitychange', handleVisibilityChange);
 		document.removeEventListener('resume', handleVisibilityChange);
 
-		// Abort any pending SSE stream
 		if (abortController) {
 			abortController.abort();
 		}
-		// Clear stream reconnection timer
 		if (streamReconnectTimer) {
 			clearTimeout(streamReconnectTimer);
 			streamReconnectTimer = null;
 		}
-		// Close real-time event stream and clear reconnect timer
 		if (eventReconnectTimer) {
 			clearTimeout(eventReconnectTimer);
 			eventReconnectTimer = null;
@@ -992,13 +894,15 @@
 			eventSource.close();
 			eventSource = null;
 		}
-		// Clear any pending tile refreshes
 		for (const timeout of pendingRefreshes.values()) {
 			clearTimeout(timeout);
 		}
 		pendingRefreshes.clear();
 		if (refreshInterval) {
 			clearInterval(refreshInterval);
+		}
+		if (countdownInterval) {
+			clearInterval(countdownInterval);
 		}
 		unsubscribeDashboardData();
 		unsubscribePrefs();
@@ -1012,7 +916,7 @@
 		<div class="flex items-center gap-4">
 			<PageHeader icon={LayoutGrid} title="Environments" count={tiles.length} />
 
-			<!-- Label filter toggles (only show if there are labels) -->
+			<!-- Label filter toggles -->
 			{#if allLabels.length > 0}
 				<div class="flex items-center gap-1.5">
 					<button
@@ -1042,7 +946,7 @@
 		</div>
 
 		<div class="flex items-center gap-1">
-			<!-- List view filters (search + connection type) -->
+			<!-- List view filters -->
 			{#if viewMode === 'list'}
 				<div class="flex items-center gap-2 mr-2">
 					<div class="relative">
@@ -1078,7 +982,7 @@
 				<Plus class="w-4 h-4" />
 			</button>
 
-			<!-- Lock toggle (only in grid view) -->
+			<!-- Lock toggle (grid view only) -->
 			{#if viewMode === 'grid'}
 				<button
 					onclick={toggleLocked}
@@ -1131,26 +1035,29 @@
 				</DropdownMenu.Content>
 			</DropdownMenu.Root>
 
-			<!-- Refresh button -->
+			<!-- Refresh button with countdown -->
 			<button
-				onclick={() => fetchStatsStreaming(true)}
-				class="p-1.5 rounded hover:bg-muted transition-colors"
-				title="Refresh"
+				onclick={() => { fetchStatsStreaming(true); startCountdown(); }}
+				class="flex items-center gap-1 px-1.5 py-1 rounded hover:bg-muted transition-colors text-xs"
+				title="Refresh (auto-refreshes every 30s)"
 				disabled={refreshing}
 			>
 				<RefreshCw class="w-4 h-4 {refreshing ? 'animate-spin' : ''}" />
+				{#if !refreshing}
+					<span class="tabular-nums text-muted-foreground w-5 text-right">{refreshCountdown}s</span>
+				{/if}
 			</button>
 		</div>
 	</div>
 
-	<!-- Initial loading state before any tiles - show until we know whether environments exist -->
+	<!-- Initial loading state -->
 	{#if !environmentsLoaded && tiles.length === 0}
 		<div class="flex items-center justify-center gap-2 text-muted-foreground py-8">
 			<Loader2 class="w-5 h-5 animate-spin text-primary" />
 			<span class="text-sm">Loading environments...</span>
 		</div>
 	{:else if tiles.length === 0 && environmentsLoaded && $environments.length === 0}
-		<!-- No environments - only shown after we've confirmed there are none -->
+		<!-- No environments -->
 		<div class="flex flex-col items-center justify-center h-64 text-muted-foreground">
 			<div class="w-16 h-16 mb-4 rounded-2xl border-2 border-dashed border-muted-foreground/30 flex items-center justify-center">
 				<Server class="w-8 h-8 opacity-40" />
@@ -1170,7 +1077,7 @@
 			onrowclick={handleTileClick}
 		/>
 	{:else if filteredGridItems.length === 0}
-		<!-- Filter shows no results (grid view) -->
+		<!-- Filter shows no results -->
 		<div class="flex flex-col items-center justify-center h-64 text-muted-foreground">
 			<div class="w-16 h-16 mb-4 rounded-2xl border-2 border-dashed border-muted-foreground/30 flex items-center justify-center">
 				<Tags class="w-8 h-8 opacity-40" />
@@ -1188,7 +1095,6 @@
 					{@const tile = getTileById(item.id)}
 					{#if tile}
 						{#if tile.loading && !tile.stats}
-							<!-- Show skeleton while loading -->
 							<div class="w-full">
 								<EnvironmentTileSkeleton
 									name={tile.info?.name}
@@ -1198,7 +1104,6 @@
 								/>
 							</div>
 						{:else if tile.stats}
-							<!-- Show actual tile with data -->
 							<div class="w-full cursor-pointer" onclick={() => handleTileClick(tile.stats!.id)}>
 								<EnvironmentTile
 									stats={tile.stats}
@@ -1213,34 +1118,31 @@
 				{/each}
 			</div>
 		{:else}
-			<!-- Custom Draggable Grid -->
 			<DraggableGrid
 				items={filteredGridItems}
-				cols={GRID_COLS}
-				rowHeight={GRID_ROW_HEIGHT}
-				gap={10}
-				minW={1}
-				maxW={2}
-				minH={1}
-				maxH={4}
 				{locked}
 				onchange={handleGridChange}
-				onitemclick={handleTileClick}
 			>
-				{#snippet children({ item })}
-					{@const tile = getTileById(item.id)}
+				{#snippet item(gridItem)}
+					{@const tile = getTileById(gridItem.id)}
 					{#if tile}
 						{#if tile.loading && !tile.stats}
-							<!-- Show skeleton while loading -->
 							<EnvironmentTileSkeleton
 								name={tile.info?.name}
 								host={tile.info?.host}
-								width={item.w}
-								height={item.h}
+								width={gridItem.w}
+								height={gridItem.h}
 							/>
 						{:else if tile.stats}
-							<!-- Show actual tile with data -->
-							<EnvironmentTile stats={tile.stats} width={item.w} height={item.h} oneventsclick={() => handleEventsClick(tile.stats!.id)} />
+							<div class="h-full cursor-pointer" onclick={() => handleTileClick(tile.stats!.id)}>
+								<EnvironmentTile
+									stats={tile.stats}
+									width={gridItem.w}
+									height={gridItem.h}
+									oneventsclick={() => handleEventsClick(tile.stats!.id)}
+									showStacksBreakdown={gridItem.w >= 2 && gridItem.h >= 3}
+								/>
+							</div>
 						{/if}
 					{/if}
 				{/snippet}
