@@ -59,13 +59,14 @@ function uptimeStr(seconds: number): string {
 function parseSize(val: any): number {
 	if (typeof val === 'number') return val;
 	if (typeof val !== 'string') return 0;
-	const m = val.trim().match(/^([\d.]+)\s*(GB|MB|KB|B)?$/i);
+	const m = val.trim().match(/^([\d.]+)\s*(TB|T|GB|G|MB|M|KB|K|B)?$/i);
 	if (!m) return 0;
 	const n = parseFloat(m[1]);
 	switch ((m[2] ?? 'B').toUpperCase()) {
-		case 'GB': return Math.round(n * 1_073_741_824);
-		case 'MB': return Math.round(n * 1_048_576);
-		case 'KB': return Math.round(n * 1_024);
+		case 'TB': case 'T': return Math.round(n * 1_099_511_627_776);
+		case 'GB': case 'G': return Math.round(n * 1_073_741_824);
+		case 'MB': case 'M': return Math.round(n * 1_048_576);
+		case 'KB': case 'K': return Math.round(n * 1_024);
 		default:   return Math.round(n);
 	}
 }
@@ -96,7 +97,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			opnGet(host, apiKey, apiSecret, '/diagnostics/system/system_disk'),
 			opnGet(host, apiKey, apiSecret, '/diagnostics/system/system_time'),
 			opnGet(host, apiKey, apiSecret, '/diagnostics/interface/get_interface_config'),
-			opnGet(host, apiKey, apiSecret, '/core/service/getServices')
+			opnGet(host, apiKey, apiSecret, '/core/service/search')
 		]);
 
 		let cpuPct = 0;
@@ -128,15 +129,15 @@ export const GET: RequestHandler = async ({ cookies }) => {
 
 		let diskUsed = 0, diskTotal = 0;
 		if (diskResult.status === 'fulfilled') {
-			const disks: any[] = diskResult.value?.devices ?? diskResult.value?.storage ?? [];
+			const disks: any[] = diskResult.value?.storage ?? diskResult.value?.devices ?? diskResult.value?.rows ?? [];
 			const rootDisk = disks.find((d: any) => d.mountpoint === '/') ??
 				           disks.sort((a: any, b: any) => parseSize(b.size) - parseSize(a.size))[0];
 			if (rootDisk) {
 				diskTotal = parseSize(rootDisk.size);
 				if (rootDisk.used !== undefined) {
 					diskUsed = parseSize(rootDisk.used);
-				} else if (typeof rootDisk.capacity === 'string') {
-					const pctNum = parseFloat(rootDisk.capacity);
+				} else if (rootDisk.capacity !== undefined) {
+					const pctNum = parseFloat(String(rootDisk.capacity).replace('%', ''));
 					if (!isNaN(pctNum)) diskUsed = Math.round(diskTotal * pctNum / 100);
 				}
 			}
@@ -156,8 +157,14 @@ export const GET: RequestHandler = async ({ cookies }) => {
 		}
 
 		let serviceList: { name: string; description: string; running: boolean }[] = [];
-		if (servicesResult.status === 'fulfilled' && Array.isArray(servicesResult.value)) {
-			serviceList = servicesResult.value.map((s: any) => ({
+		if (servicesResult.status === 'fulfilled') {
+			const _svcRaw = servicesResult.value;
+			const _svcRows: any[] = Array.isArray(_svcRaw)
+				? _svcRaw
+				: Array.isArray((_svcRaw as any)?.rows)
+					? (_svcRaw as any).rows
+					: [];
+			serviceList = _svcRows.map((s: any) => ({
 				name:        s.name        ?? s.id   ?? 'unknown',
 				description: s.description ?? '',
 				running:     s.running === true || s.running === 1 || s.running === '1'

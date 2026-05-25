@@ -37,6 +37,7 @@
 
 	const GRAPH_POINTS = 30;
 	let countdownInterval: ReturnType<typeof setInterval> | undefined;
+	let trafficInterval: ReturnType<typeof setInterval> | undefined;
 
 	function fmtBytes(bytes: number): string {
 		if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
@@ -63,34 +64,34 @@
 		return 'bg-emerald-500';
 	}
 
+	async function fetchTraffic() {
+		try {
+			const trafficRes = await fetch('/api/opnsense/traffic');
+			if (!trafficRes.ok) return;
+			const tData: TrafficData = await trafficRes.json();
+			if ((tData as any).error) return;
+			prevTraffic = traffic;
+			traffic = tData;
+			let totalRx = 0, totalTx = 0;
+			for (const iface of Object.values(tData.interfaces)) {
+				totalRx += iface.rxRate;
+				totalTx += iface.txRate;
+			}
+			const now = new Date();
+			const label = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+			trafficHistory = [...trafficHistory.slice(-(GRAPH_POINTS - 1)), { time: label, rx: totalRx, tx: totalTx }];
+		} catch { /* non-fatal */ }
+	}
+
 	async function fetchAll() {
 		try {
-			const [statsRes, trafficRes] = await Promise.all([
-				fetch('/api/opnsense'),
-				fetch('/api/opnsense/traffic')
-			]);
+			const statsRes = await fetch('/api/opnsense');
 
 			const stats = await statsRes.json();
 			if (stats.error) { error = stats.error; data = null; }
 			else { error = null; data = stats; }
 
-			if (trafficRes.ok) {
-				const tData: TrafficData = await trafficRes.json();
-				if (!tData.error) {
-					prevTraffic = traffic;
-					traffic = tData;
-
-					let totalRx = 0, totalTx = 0;
-					for (const iface of Object.values(tData.interfaces)) {
-						totalRx += iface.rxRate;
-						totalTx += iface.txRate;
-					}
-
-					const now = new Date();
-					const label = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
-					trafficHistory = [...trafficHistory.slice(-(GRAPH_POINTS - 1)), { time: label, rx: totalRx, tx: totalTx }];
-				}
-			}
+			await fetchTraffic();
 		} catch (e: any) {
 			error = e.message ?? 'Failed to load OPNsense data';
 		} finally {
@@ -133,10 +134,12 @@
 	onMount(() => {
 		fetchAll();
 		startCycle();
+		trafficInterval = setInterval(fetchTraffic, 5000);
 	});
 
 	onDestroy(() => {
 		clearInterval(countdownInterval);
+		clearInterval(trafficInterval);
 	});
 </script>
 

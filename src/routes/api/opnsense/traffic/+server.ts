@@ -45,11 +45,12 @@ async function readTrafficFrames(
 
 	if (frames.length === 0) throw new Error('No traffic data in stream');
 
-	// Use the last frame directly — OPNsense already emits deltas (bytes since last poll),
-	// so we don't need to compute differences ourselves.
+	// OPNsense bytes_received/transmitted are CUMULATIVE counters.
+	// We must diff two frames to get actual throughput.
+	const firstFrame = frames[0];
 	const frame = frames[frames.length - 1];
 	const timeDelta = frames.length >= 2
-		? Math.max(1, (frame.time ?? 1) - (frames[0].time ?? 0))
+		? Math.max(1, (frame.time ?? 1) - (firstFrame.time ?? 0))
 		: 1;
 
 	const ifaceMap: Record<string, { name: string; rxRate: number; txRate: number }> = {};
@@ -57,10 +58,13 @@ async function readTrafficFrames(
 
 	for (const [dev, info] of Object.entries(frame.interfaces as Record<string, any>)) {
 		if (typeof info !== 'object' || !info) continue;
-		// bytes_received / bytes_transmitted are deltas per poll interval
-		const rx = (info.bytes_received   ?? info['bytes received']   ?? 0);
-		const tx = (info.bytes_transmitted ?? info['bytes transmitted'] ?? 0);
-		// Convert bytes-per-interval to bits-per-second
+		const prev = (firstFrame.interfaces as Record<string, any>)?.[dev] ?? {};
+		const rxNow  = Number(info.bytes_received    ?? info['bytes received']    ?? 0);
+		const txNow  = Number(info.bytes_transmitted  ?? info['bytes transmitted']  ?? 0);
+		const rxPrev = Number(prev.bytes_received    ?? prev['bytes received']    ?? 0);
+		const txPrev = Number(prev.bytes_transmitted  ?? prev['bytes transmitted']  ?? 0);
+		const rx = Math.max(0, rxNow - rxPrev);
+		const tx = Math.max(0, txNow - txPrev);
 		const rxBps = (rx / timeDelta) * 8;
 		const txBps = (tx / timeDelta) * 8;
 		ifaceMap[dev] = { name: info.name ?? dev, rxRate: rxBps, txRate: txBps };
