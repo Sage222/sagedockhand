@@ -11,10 +11,6 @@ async function opnGet(host: string, key: string, secret: string, path: string) {
 	return res.json();
 }
 
-/**
- * Read one valid data frame from the OPNsense CPU SSE stream.
- * Skip the first frame (baseline) and return the second real delta.
- */
 async function fetchCpuFromStream(host: string, key: string, secret: string): Promise<number> {
 	const credentials = Buffer.from(`${key}:${secret}`).toString('base64');
 	const res = await fetch(`${host}/api/diagnostics/cpu_usage/stream`, {
@@ -60,10 +56,6 @@ function uptimeStr(seconds: number): string {
 	return `${m}m`;
 }
 
-/**
- * Parse a human-readable size string into bytes.
- * Handles: "932 MB", "2.1 GB", "512 B", or raw numbers.
- */
 function parseSize(val: any): number {
 	if (typeof val === 'number') return val;
 	if (typeof val !== 'string') return 0;
@@ -98,7 +90,6 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			);
 		}
 
-		// Parallel fetch: system info, resources (memory), disk, time (uptime), interface config (IPs), services
 		const [sysInfoResult, memResult, diskResult, timeResult, ifaceConfigResult, servicesResult] = await Promise.allSettled([
 			opnGet(host, apiKey, apiSecret, '/diagnostics/system/system_information'),
 			opnGet(host, apiKey, apiSecret, '/diagnostics/system/system_resources'),
@@ -108,25 +99,19 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			opnGet(host, apiKey, apiSecret, '/core/service/getServices')
 		]);
 
-		// CPU via SSE stream
 		let cpuPct = 0;
 		try { cpuPct = await fetchCpuFromStream(host, apiKey, apiSecret); } catch { /* non-fatal */ }
 
-		// --- System info: { name: string, versions: string[] } ---
 		const sys = sysInfoResult.status === 'fulfilled' ? sysInfoResult.value : {};
 		const hostname: string = sys?.name ?? 'OPNsense';
 		const version: string  = Array.isArray(sys?.versions) ? (sys.versions[0] ?? '') : '';
 
-		// --- Uptime via system_time ---
-		// Shape: { uptime: number (seconds), datetime: string, ... }
 		let uptimeSeconds = 0;
 		if (timeResult.status === 'fulfilled') {
 			const t = timeResult.value;
-			// Primary: numeric uptime field
 			if (typeof t?.uptime === 'number') {
 				uptimeSeconds = t.uptime;
 			} else if (typeof t?.uptime === 'string') {
-				// May be a formatted string like "3 days, 4:02" — parse it
 				const dm = t.uptime.match(/(\d+)\s+day[s]?,\s*(\d+):(\d+)/);
 				if (dm) uptimeSeconds = parseInt(dm[1]) * 86400 + parseInt(dm[2]) * 3600 + parseInt(dm[3]) * 60;
 				else {
@@ -136,24 +121,18 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			}
 		}
 
-		// --- Memory: system_resources ---
-		// Shape: { memory: { total: "2133 MB", used: "921 MB", ... } }
 		const memData  = memResult.status === 'fulfilled' ? memResult.value : {};
 		const memStats = memData?.memory ?? memData ?? {};
 		const memTotal = parseSize(memStats.total ?? memStats.total_real ?? 0);
 		const memUsed  = parseSize(memStats.used  ?? memStats.used_real  ?? 0);
 
-		// --- Disk: system_disk ---
-		// Shape: { devices: [ { device, size, used, available, capacity, mountpoint } ] }
 		let diskUsed = 0, diskTotal = 0;
 		if (diskResult.status === 'fulfilled') {
 			const disks: any[] = diskResult.value?.devices ?? diskResult.value?.storage ?? [];
-			// Prefer root mount, fallback to largest partition
 			const rootDisk = disks.find((d: any) => d.mountpoint === '/') ??
 				           disks.sort((a: any, b: any) => parseSize(b.size) - parseSize(a.size))[0];
 			if (rootDisk) {
 				diskTotal = parseSize(rootDisk.size);
-				// "used" may be absent; derive from capacity % if needed
 				if (rootDisk.used !== undefined) {
 					diskUsed = parseSize(rootDisk.used);
 				} else if (typeof rootDisk.capacity === 'string') {
@@ -163,8 +142,6 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			}
 		}
 
-		// --- Interfaces: get_interface_config ---
-		// Shape: { [iface]: { descr, ipaddr, ipaddrv6, status, enable, ... } }
 		const ifCfg = ifaceConfigResult.status === 'fulfilled' ? ifaceConfigResult.value : {};
 		const interfaceList: { name: string; device: string; ipv4: string; ipv6: string; status: string }[] = [];
 		for (const [dev, info] of Object.entries(ifCfg as Record<string, any>)) {
@@ -178,7 +155,6 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			});
 		}
 
-		// --- Services ---
 		let serviceList: { name: string; description: string; running: boolean }[] = [];
 		if (servicesResult.status === 'fulfilled' && Array.isArray(servicesResult.value)) {
 			serviceList = servicesResult.value.map((s: any) => ({
@@ -199,7 +175,8 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			diskUsed,
 			diskTotal,
 			interfaces: interfaceList,
-			services: serviceList
+			services: serviceList,
+			opnsenseHost: host
 		});
 	} catch (err: any) {
 		console.error('OPNsense API error:', err);

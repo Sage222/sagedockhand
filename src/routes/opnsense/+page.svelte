@@ -4,8 +4,7 @@
 
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { ShieldCheck, RefreshCw, Cpu, MemoryStick, HardDrive, Clock, Network, Activity, CheckCircle2, XCircle, WifiOff, ChevronRight } from 'lucide-svelte';
-	import PageHeader from '$lib/components/PageHeader.svelte';
+	import { ShieldCheck, RefreshCw, Cpu, MemoryStick, HardDrive, Clock, Network, Activity, CheckCircle2, XCircle, WifiOff, ChevronRight, ExternalLink } from 'lucide-svelte';
 
 	interface OPNsenseData {
 		hostname: string;
@@ -18,6 +17,7 @@
 		diskTotal: number;
 		interfaces: { name: string; device: string; ipv4: string; ipv6: string; status: string }[];
 		services: { name: string; description: string; running: boolean }[];
+		opnsenseHost: string;
 	}
 
 	interface TrafficData {
@@ -33,11 +33,10 @@
 	let refreshCountdown = $state(30);
 	let refreshing = $state(false);
 
-	// Traffic graph — last 30 data points
 	let trafficHistory = $state<{ time: string; rx: number; tx: number }[]>([]);
 
 	const GRAPH_POINTS = 30;
-	let countdownInterval: ReturnType<typeof setInterval>;
+	let countdownInterval: ReturnType<typeof setInterval> | undefined;
 
 	function fmtBytes(bytes: number): string {
 		if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
@@ -81,7 +80,6 @@
 					prevTraffic = traffic;
 					traffic = tData;
 
-					// Compute aggregate rx/tx rates across all interfaces
 					let totalRx = 0, totalTx = 0;
 					for (const iface of Object.values(tData.interfaces)) {
 						totalRx += iface.rxRate;
@@ -101,14 +99,15 @@
 		}
 	}
 
+	// Single interval — ticks every second, fetches at 0.
 	function startCycle() {
-		refreshCountdown = 30;
 		clearInterval(countdownInterval);
-		countdownInterval = setInterval(() => {
-			refreshCountdown--;
-			if (refreshCountdown <= 0) {
+		refreshCountdown = 30;
+		countdownInterval = setInterval(async () => {
+			refreshCountdown = Math.max(0, refreshCountdown - 1);
+			if (refreshCountdown === 0) {
 				refreshing = true;
-				fetchAll();
+				await fetchAll();
 				refreshCountdown = 30;
 			}
 		}, 1000);
@@ -139,16 +138,28 @@
 	onDestroy(() => {
 		clearInterval(countdownInterval);
 	});
-
-	$effect(() => {
-		if (!loading && !refreshing) startCycle();
-	});
 </script>
 
 <div class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">
 	<!-- Header -->
 	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
-		<PageHeader icon={ShieldCheck} title="OPNsense" showConnection={false} />
+		<div class="flex items-center gap-2">
+			<ShieldCheck class="w-5 h-5 text-muted-foreground" />
+			{#if data?.opnsenseHost}
+				<a
+					href={data.opnsenseHost}
+					target="_blank"
+					rel="noopener noreferrer"
+					class="text-xl font-semibold hover:text-primary transition-colors inline-flex items-center gap-1.5"
+					title="Open OPNsense UI"
+				>
+					OPNsense
+					<ExternalLink class="w-3.5 h-3.5 text-muted-foreground" />
+				</a>
+			{:else}
+				<span class="text-xl font-semibold">OPNsense</span>
+			{/if}
+		</div>
 		<div class="flex items-center gap-2">
 			<span class="text-xs text-muted-foreground tabular-nums">{refreshCountdown}s</span>
 			<button
@@ -259,7 +270,6 @@
 								<path d="{txPath}" fill="none" stroke="rgb(59 130 246)" stroke-width="1.5" />
 							{/if}
 						</svg>
-						<!-- Current rates -->
 						<div class="grid grid-cols-2 gap-4 pt-1">
 							<div class="text-center">
 								<p class="text-xs text-muted-foreground">↓ Download</p>

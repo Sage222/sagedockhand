@@ -15,11 +15,10 @@
 	let refreshing = $state(false);
 	let actionStatus = $state<Record<number, string>>({});
 	let actionError = $state<Record<number, string>>({});
-	let interval: ReturnType<typeof setInterval>;
 
 	const REFRESH_INTERVAL_S = 30;
 	let countdown = $state(REFRESH_INTERVAL_S);
-	let countdownInterval: ReturnType<typeof setInterval>;
+	let countdownInterval: ReturnType<typeof setInterval> | undefined;
 
 	let initialLoading = $state(!data.data && !data.error && !data.notConfigured);
 
@@ -81,19 +80,28 @@
 		return null;
 	}
 
-	async function refresh() {
-		refreshing = true;
-		countdown = REFRESH_INTERVAL_S;
-		await invalidate('proxmox:data');
-		refreshing = false;
-	}
-
-	function resetCountdown() {
+	// Single countdown interval — ticks every second, triggers refresh at 0.
+	// This avoids the dual-interval drift where setInterval and countdownInterval
+	// fought each other and caused stale data unless F5 was pressed.
+	function startCycle() {
 		clearInterval(countdownInterval);
 		countdown = REFRESH_INTERVAL_S;
-		countdownInterval = setInterval(() => {
+		countdownInterval = setInterval(async () => {
 			countdown = Math.max(0, countdown - 1);
+			if (countdown === 0) {
+				refreshing = true;
+				await invalidate('proxmox:data');
+				refreshing = false;
+				countdown = REFRESH_INTERVAL_S;
+			}
 		}, 1000);
+	}
+
+	async function refresh() {
+		refreshing = true;
+		await invalidate('proxmox:data');
+		refreshing = false;
+		startCycle();
 	}
 
 	async function doAction(vmid: number, type: string, action: string) {
@@ -121,11 +129,9 @@
 
 	onMount(() => {
 		initialLoading = false;
-		resetCountdown();
-		interval = setInterval(() => { refresh(); resetCountdown(); }, 30_000);
+		startCycle();
 	});
 	onDestroy(() => {
-		clearInterval(interval);
 		clearInterval(countdownInterval);
 	});
 </script>
