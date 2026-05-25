@@ -12,9 +12,8 @@ async function opnGet(host: string, key: string, secret: string, path: string) {
 }
 
 /**
- * Read the first valid data frame from the OPNsense CPU SSE stream.
- * The stream emits "data: {...}" lines continuously. We skip the first
- * frame (baseline) and return the second, which contains the real delta.
+ * Read one valid data frame from the OPNsense CPU SSE stream.
+ * Skip the first frame (baseline) and return the second real delta.
  */
 async function fetchCpuFromStream(host: string, key: string, secret: string): Promise<number> {
 	const credentials = Buffer.from(`${key}:${secret}`).toString('base64');
@@ -39,14 +38,11 @@ async function fetchCpuFromStream(host: string, key: string, secret: string): Pr
 			for (const line of lines) {
 				if (!line.startsWith('data:')) continue;
 				frameCount++;
-				if (frameCount < 2) continue; // skip baseline frame
+				if (frameCount < 2) continue;
 				try {
 					const parsed = JSON.parse(line.substring(5).trim());
-					// { total: number } — 0–100
 					if (typeof parsed?.total === 'number') return parsed.total;
-				} catch {
-					// malformed frame — keep reading
-				}
+				} catch { /* malformed frame */ }
 			}
 		}
 	} finally {
@@ -62,6 +58,24 @@ function uptimeStr(seconds: number): string {
 	if (d > 0) return `${d}d ${h}h ${m}m`;
 	if (h > 0) return `${h}h ${m}m`;
 	return `${m}m`;
+}
+
+/**
+ * Parse a human-readable size string into bytes.
+ * Handles: "932 MB", "2.1 GB", "512 B", or raw numbers.
+ */
+function parseSize(val: any): number {
+	if (typeof val === 'number') return val;
+	if (typeof val !== 'string') return 0;
+	const m = val.trim().match(/^([\d.]+)\s*(GB|MB|KB|B)?$/i);
+	if (!m) return 0;
+	const n = parseFloat(m[1]);
+	switch ((m[2] ?? 'B').toUpperCase()) {
+		case 'GB': return Math.round(n * 1_073_741_824);
+		case 'MB': return Math.round(n * 1_048_576);
+		case 'KB': return Math.round(n * 1_024);
+		default:   return Math.round(n);
+	}
 }
 
 export const GET: RequestHandler = async ({ cookies }) => {
@@ -84,84 +98,83 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			);
 		}
 
-		// Fetch system info, memory, interfaces and services in parallel.
-		// CPU uses a streaming endpoint so it runs separately.
-		const [sysInfoResult, memResult, ifaceResult, servicesResult] = await Promise.allSettled([
+		// Parallel fetch: system info, resources (memory), disk, time (uptime), interface config (IPs), services
+		const [sysInfoResult, memResult, diskResult, timeResult, ifaceConfigResult, servicesResult] = await Promise.allSettled([
 			opnGet(host, apiKey, apiSecret, '/diagnostics/system/system_information'),
 			opnGet(host, apiKey, apiSecret, '/diagnostics/system/system_resources'),
-			opnGet(host, apiKey, apiSecret, '/diagnostics/traffic/interface'),
+			opnGet(host, apiKey, apiSecret, '/diagnostics/system/system_disk'),
+			opnGet(host, apiKey, apiSecret, '/diagnostics/system/system_time'),
+			opnGet(host, apiKey, apiSecret, '/diagnostics/interface/get_interface_config'),
 			opnGet(host, apiKey, apiSecret, '/core/service/getServices')
 		]);
 
-		// CPU — streaming SSE endpoint
+		// CPU via SSE stream
 		let cpuPct = 0;
-		try {
-			cpuPct = await fetchCpuFromStream(host, apiKey, apiSecret);
-		} catch {
-			// Non-fatal — show 0 if stream unavailable
-		}
+		try { cpuPct = await fetchCpuFromStream(host, apiKey, apiSecret); } catch { /* non-fatal */ }
 
-		// --- System info ---
-		// Actual API shape: { name: string, versions: [string, ...] }
+		// --- System info: { name: string, versions: string[] } ---
 		const sys = sysInfoResult.status === 'fulfilled' ? sysInfoResult.value : {};
 		const hostname: string = sys?.name ?? 'OPNsense';
-		const version: string = Array.isArray(sys?.versions) ? (sys.versions[0] ?? '') : '';
+		const version: string  = Array.isArray(sys?.versions) ? (sys.versions[0] ?? '') : '';
 
-		// --- Uptime ---
-		// system_information does not expose uptime as a number.
-		// Parse it from versions[0] which looks like:
-		// "OPNsense 26.1.6_2 ... up 3 days, 4:02"
+		// --- Uptime via system_time ---
+		// Shape: { uptime: number (seconds), datetime: string, ... }
 		let uptimeSeconds = 0;
-		const verStr: string = version;
-		const upMatch = verStr.match(/up\s+(\d+)\s+day[s]?,\s*(\d+):(\d+)/);
-		if (upMatch) {
-			uptimeSeconds = parseInt(upMatch[1]) * 86400 + parseInt(upMatch[2]) * 3600 + parseInt(upMatch[3]) * 60;
-		} else {
-			const hrMatch = verStr.match(/up\s+(\d+):(\d+)/);
-			if (hrMatch) uptimeSeconds = parseInt(hrMatch[1]) * 3600 + parseInt(hrMatch[2]) * 60;
-		}
-
-		// --- Memory ---
-		// Actual API shape from /diagnostics/system/system_resources:
-		// {
-		//   memory: { total: "2133 MB", used: "921 MB", ... }
-		// }
-		// Values are human-readable strings like "2133 MB" or "921 MB".
-		// We parse them into bytes.
-		const memData = memResult.status === 'fulfilled' ? memResult.value : {};
-		const memStats = memData?.memory ?? memData ?? {};
-
-		function parseMemStr(val: any): number {
-			if (typeof val === 'number') return val;
-			if (typeof val === 'string') {
-				const m = val.match(/([\d.]+)\s*(MB|GB|KB|B)?/i);
-				if (!m) return 0;
-				const n = parseFloat(m[1]);
-				const unit = (m[2] ?? 'B').toUpperCase();
-				if (unit === 'GB') return Math.round(n * 1073741824);
-				if (unit === 'MB') return Math.round(n * 1048576);
-				if (unit === 'KB') return Math.round(n * 1024);
-				return Math.round(n);
+		if (timeResult.status === 'fulfilled') {
+			const t = timeResult.value;
+			// Primary: numeric uptime field
+			if (typeof t?.uptime === 'number') {
+				uptimeSeconds = t.uptime;
+			} else if (typeof t?.uptime === 'string') {
+				// May be a formatted string like "3 days, 4:02" — parse it
+				const dm = t.uptime.match(/(\d+)\s+day[s]?,\s*(\d+):(\d+)/);
+				if (dm) uptimeSeconds = parseInt(dm[1]) * 86400 + parseInt(dm[2]) * 3600 + parseInt(dm[3]) * 60;
+				else {
+					const hm = t.uptime.match(/(\d+):(\d+)/);
+					if (hm) uptimeSeconds = parseInt(hm[1]) * 3600 + parseInt(hm[2]) * 60;
+				}
 			}
-			return 0;
 		}
 
-		// Field names may be 'total'/'used' or 'total_real'/'used_real' depending on version
-		const memTotal: number = parseMemStr(memStats.total ?? memStats.total_real ?? 0);
-		const memUsed: number  = parseMemStr(memStats.used  ?? memStats.used_real  ?? 0);
+		// --- Memory: system_resources ---
+		// Shape: { memory: { total: "2133 MB", used: "921 MB", ... } }
+		const memData  = memResult.status === 'fulfilled' ? memResult.value : {};
+		const memStats = memData?.memory ?? memData ?? {};
+		const memTotal = parseSize(memStats.total ?? memStats.total_real ?? 0);
+		const memUsed  = parseSize(memStats.used  ?? memStats.used_real  ?? 0);
 
-		// --- Interfaces / Traffic ---
-		// Shape: { interfaces: { [key]: { name, "bytes received": string, "bytes transmitted": string } }, time: number }
-		const ifaceData = ifaceResult.status === 'fulfilled' ? ifaceResult.value : {};
-		const ifObj: Record<string, any> = ifaceData?.interfaces ?? {};
-		const interfaceList: { name: string; device: string; rxBytes: number; txBytes: number }[] = [];
-		for (const [dev, info] of Object.entries(ifObj)) {
+		// --- Disk: system_disk ---
+		// Shape: { devices: [ { device, size, used, available, capacity, mountpoint } ] }
+		let diskUsed = 0, diskTotal = 0;
+		if (diskResult.status === 'fulfilled') {
+			const disks: any[] = diskResult.value?.devices ?? diskResult.value?.storage ?? [];
+			// Prefer root mount, fallback to largest partition
+			const rootDisk = disks.find((d: any) => d.mountpoint === '/') ??
+				           disks.sort((a: any, b: any) => parseSize(b.size) - parseSize(a.size))[0];
+			if (rootDisk) {
+				diskTotal = parseSize(rootDisk.size);
+				// "used" may be absent; derive from capacity % if needed
+				if (rootDisk.used !== undefined) {
+					diskUsed = parseSize(rootDisk.used);
+				} else if (typeof rootDisk.capacity === 'string') {
+					const pctNum = parseFloat(rootDisk.capacity);
+					if (!isNaN(pctNum)) diskUsed = Math.round(diskTotal * pctNum / 100);
+				}
+			}
+		}
+
+		// --- Interfaces: get_interface_config ---
+		// Shape: { [iface]: { descr, ipaddr, ipaddrv6, status, enable, ... } }
+		const ifCfg = ifaceConfigResult.status === 'fulfilled' ? ifaceConfigResult.value : {};
+		const interfaceList: { name: string; device: string; ipv4: string; ipv6: string; status: string }[] = [];
+		for (const [dev, info] of Object.entries(ifCfg as Record<string, any>)) {
 			if (typeof info !== 'object' || !info) continue;
 			interfaceList.push({
-				name: (info as any).name ?? dev,
+				name:   info.descr ?? info.name ?? dev,
 				device: dev,
-				rxBytes: parseInt((info as any)['bytes received'] ?? '0', 10),
-				txBytes: parseInt((info as any)['bytes transmitted'] ?? '0', 10)
+				ipv4:   info.ipaddr   ?? '',
+				ipv6:   info.ipaddrv6 ?? '',
+				status: info.enable === '1' || info.enable === true ? 'up' : 'down'
 			});
 		}
 
@@ -169,9 +182,9 @@ export const GET: RequestHandler = async ({ cookies }) => {
 		let serviceList: { name: string; description: string; running: boolean }[] = [];
 		if (servicesResult.status === 'fulfilled' && Array.isArray(servicesResult.value)) {
 			serviceList = servicesResult.value.map((s: any) => ({
-				name: s.name ?? s.id ?? 'unknown',
+				name:        s.name        ?? s.id   ?? 'unknown',
 				description: s.description ?? '',
-				running: s.running === true || s.running === 1 || s.running === '1'
+				running:     s.running === true || s.running === 1 || s.running === '1'
 			}));
 		}
 
@@ -183,9 +196,8 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			cpuPct: Math.round(cpuPct * 100) / 100,
 			memUsed,
 			memTotal,
-			// Disk not available via these endpoints
-			diskUsed: 0,
-			diskTotal: 0,
+			diskUsed,
+			diskTotal,
 			interfaces: interfaceList,
 			services: serviceList
 		});

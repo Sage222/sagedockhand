@@ -7,7 +7,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import {
 		Server, Cpu, MemoryStick, HardDrive, Play, Square, RefreshCw,
-		AlertCircle, Settings, Power, RotateCcw, StopCircle, Zap, Loader2
+		AlertCircle, Settings, Power, RotateCcw, StopCircle, Zap, Loader2, ExternalLink
 	} from 'lucide-svelte';
 
 	let { data } = $props();
@@ -17,12 +17,10 @@
 	let actionError = $state<Record<number, string>>({});
 	let interval: ReturnType<typeof setInterval>;
 
-	// Countdown timer state
 	const REFRESH_INTERVAL_S = 30;
 	let countdown = $state(REFRESH_INTERVAL_S);
 	let countdownInterval: ReturnType<typeof setInterval>;
 
-	// Loading overlay — show on first navigation to the page
 	let initialLoading = $state(!data.data && !data.error && !data.notConfigured);
 
 	type Guest = { vmid: number; name: string; status: string; type: string; cpu: number; mem: number; maxmem: number; uptime: number | null; ip: string | null; };
@@ -83,8 +81,6 @@
 		return null;
 	}
 
-	// Use targeted invalidation — only busts the proxmox:data dependency,
-	// not the entire page, so nav clicks that hit the server cache are instant.
 	async function refresh() {
 		refreshing = true;
 		countdown = REFRESH_INTERVAL_S;
@@ -102,7 +98,7 @@
 
 	async function doAction(vmid: number, type: string, action: string) {
 		actionStatus = { ...actionStatus, [vmid]: 'loading' };
-		actionError = { ...actionError, [vmid]: '' };
+		actionError  = { ...actionError,  [vmid]: '' };
 		try {
 			const res = await fetch('/api/proxmox/action', {
 				method: 'POST',
@@ -110,21 +106,23 @@
 				body: JSON.stringify({ vmid, type, action })
 			});
 			const json = await res.json();
-			if (json.error) { actionStatus = { ...actionStatus, [vmid]: 'error' }; actionError = { ...actionError, [vmid]: json.error }; }
-			else { actionStatus = { ...actionStatus, [vmid]: 'ok' }; setTimeout(() => { actionStatus = { ...actionStatus, [vmid]: '' }; refresh(); }, 1500); }
+			if (json.error) {
+				actionStatus = { ...actionStatus, [vmid]: 'error' };
+				actionError  = { ...actionError,  [vmid]: json.error };
+			} else {
+				actionStatus = { ...actionStatus, [vmid]: 'ok' };
+				setTimeout(() => { actionStatus = { ...actionStatus, [vmid]: '' }; refresh(); }, 1500);
+			}
 		} catch (e: any) {
 			actionStatus = { ...actionStatus, [vmid]: 'error' };
-			actionError = { ...actionError, [vmid]: e.message };
+			actionError  = { ...actionError,  [vmid]: e.message };
 		}
 	}
 
 	onMount(() => {
 		initialLoading = false;
 		resetCountdown();
-		interval = setInterval(() => {
-			refresh();
-			resetCountdown();
-		}, 30_000);
+		interval = setInterval(() => { refresh(); resetCountdown(); }, 30_000);
 	});
 	onDestroy(() => {
 		clearInterval(interval);
@@ -132,7 +130,6 @@
 	});
 </script>
 
-<!-- Loading overlay — shown during initial SSR load before hydration -->
 {#if initialLoading}
 	<div class="flex flex-col items-center justify-center gap-3 py-24 text-muted-foreground">
 		<Loader2 class="w-6 h-6 animate-spin" />
@@ -144,7 +141,20 @@
 	<div class="flex items-center justify-between">
 		<div class="flex items-center gap-2">
 			<Server class="w-5 h-5 text-muted-foreground" />
-			<h1 class="text-xl font-semibold">Proxmox</h1>
+			{#if data.proxmoxHost}
+				<a
+					href={data.proxmoxHost}
+					target="_blank"
+					rel="noopener noreferrer"
+					class="text-xl font-semibold hover:text-primary transition-colors inline-flex items-center gap-1.5"
+					title="Open Proxmox UI"
+				>
+					Proxmox
+					<ExternalLink class="w-3.5 h-3.5 text-muted-foreground" />
+				</a>
+			{:else}
+				<h1 class="text-xl font-semibold">Proxmox</h1>
+			{/if}
 			{#if data.data}
 				<span class="text-sm text-muted-foreground font-normal">— {data.data.node}</span>
 			{/if}
@@ -205,20 +215,19 @@
 
 		<!-- Graphs row -->
 		{#if rrd.length > 2}
-			{@const netinSeries = rrd.map(p => p.netin)}
+			{@const netinSeries  = rrd.map(p => p.netin)}
 			{@const netoutSeries = rrd.map(p => p.netout)}
-			{@const cpuSeries = rrd.map(p => p.cpu)}
-			{@const memSeries = rrd.map(p => p.mem)}
-			{@const netinLast = lastVal(netinSeries)}
-			{@const netoutLast = lastVal(netoutSeries)}
-			{@const cpuLast = lastVal(cpuSeries)}
-			{@const memLast = lastVal(memSeries)}
-			{@const cpuMax = seriesMax(cpuSeries)}
-			{@const memMax = seriesMax(memSeries)}
-			{@const netMax = seriesMax([...netinSeries, ...netoutSeries])}
+			{@const cpuSeries    = rrd.map(p => p.cpu)}
+			{@const memSeries    = rrd.map(p => p.mem)}
+			{@const netinLast    = lastVal(netinSeries)}
+			{@const netoutLast   = lastVal(netoutSeries)}
+			{@const cpuLast      = lastVal(cpuSeries)}
+			{@const memLast      = lastVal(memSeries)}
+			{@const cpuMax       = seriesMax(cpuSeries)}
+			{@const memMax       = seriesMax(memSeries)}
+			{@const netMax       = seriesMax([...netinSeries, ...netoutSeries])}
 
 			<div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-				<!-- Network graph -->
 				<div class="rounded-lg border bg-card p-3 space-y-1">
 					<div class="flex items-center justify-between">
 						<span class="text-xs font-medium text-muted-foreground">Network I/O (1h)</span>
@@ -228,63 +237,39 @@
 						</div>
 					</div>
 					<svg viewBox="0 0 200 44" class="w-full" preserveAspectRatio="none" style="height:52px">
-						{#if sparkline(netinSeries)}
-							<polyline points={sparkline(netinSeries)} fill="none" stroke="#3b82f6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" />
-						{/if}
-						{#if sparkline(netoutSeries)}
-							<polyline points={sparkline(netoutSeries)} fill="none" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" />
-						{/if}
-						{#if netMax !== null}
-							<text x="2" y="8" font-size="6" fill="currentColor" opacity="0.4">{fmtBps(netMax)}</text>
-						{/if}
+						{#if sparkline(netinSeries)}<polyline points={sparkline(netinSeries)} fill="none" stroke="#3b82f6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" />{/if}
+						{#if sparkline(netoutSeries)}<polyline points={sparkline(netoutSeries)} fill="none" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" />{/if}
+						{#if netMax !== null}<text x="2" y="8" font-size="6" fill="currentColor" opacity="0.4">{fmtBps(netMax)}</text>{/if}
 						<text x="2" y="42" font-size="6" fill="currentColor" opacity="0.4">0</text>
 					</svg>
 				</div>
-
-				<!-- CPU over time -->
 				<div class="rounded-lg border bg-card p-3 space-y-1">
 					<div class="flex items-center justify-between">
 						<span class="text-xs font-medium text-muted-foreground">CPU Usage (1h)</span>
-						{#if cpuLast !== null}
-							<span class="text-xs tabular-nums {cpuLast > 0.9 ? 'text-destructive' : cpuLast > 0.7 ? 'text-yellow-500' : 'text-muted-foreground'}">{(cpuLast * 100).toFixed(1)}%</span>
-						{/if}
+						{#if cpuLast !== null}<span class="text-xs tabular-nums {cpuLast > 0.9 ? 'text-destructive' : cpuLast > 0.7 ? 'text-yellow-500' : 'text-muted-foreground'}">{(cpuLast * 100).toFixed(1)}%</span>{/if}
 					</div>
 					<svg viewBox="0 0 200 44" class="w-full" preserveAspectRatio="none" style="height:52px">
-						{#if sparkline(cpuSeries)}
-							<polyline points={sparkline(cpuSeries)} fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
-						{/if}
-						{#if cpuMax !== null}
-							<text x="2" y="8" font-size="6" fill="currentColor" opacity="0.4">{(cpuMax * 100).toFixed(0)}%</text>
-						{/if}
+						{#if sparkline(cpuSeries)}<polyline points={sparkline(cpuSeries)} fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />{/if}
+						{#if cpuMax !== null}<text x="2" y="8" font-size="6" fill="currentColor" opacity="0.4">{(cpuMax * 100).toFixed(0)}%</text>{/if}
 						<text x="2" y="42" font-size="6" fill="currentColor" opacity="0.4">0%</text>
 					</svg>
 				</div>
-
-				<!-- Memory over time -->
 				<div class="rounded-lg border bg-card p-3 space-y-1">
 					<div class="flex items-center justify-between">
 						<span class="text-xs font-medium text-muted-foreground">Memory Usage (1h)</span>
-						{#if memLast !== null}
-							<span class="text-xs tabular-nums {memLast > 0.9 ? 'text-destructive' : memLast > 0.7 ? 'text-yellow-500' : 'text-muted-foreground'}">{(memLast * 100).toFixed(1)}%</span>
-						{/if}
+						{#if memLast !== null}<span class="text-xs tabular-nums {memLast > 0.9 ? 'text-destructive' : memLast > 0.7 ? 'text-yellow-500' : 'text-muted-foreground'}">{(memLast * 100).toFixed(1)}%</span>{/if}
 					</div>
 					<svg viewBox="0 0 200 44" class="w-full" preserveAspectRatio="none" style="height:52px">
-						{#if sparkline(memSeries)}
-							<polyline points={sparkline(memSeries)} fill="none" stroke="#34d399" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
-						{/if}
-						{#if memMax !== null}
-							<text x="2" y="8" font-size="6" fill="currentColor" opacity="0.4">{(memMax * 100).toFixed(0)}%</text>
-						{/if}
+						{#if sparkline(memSeries)}<polyline points={sparkline(memSeries)} fill="none" stroke="#34d399" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />{/if}
+						{#if memMax !== null}<text x="2" y="8" font-size="6" fill="currentColor" opacity="0.4">{(memMax * 100).toFixed(0)}%</text>{/if}
 						<text x="2" y="42" font-size="6" fill="currentColor" opacity="0.4">0%</text>
 					</svg>
 				</div>
 			</div>
 		{/if}
 
-		<!-- Uptime + countdown -->
 		<div class="text-xs text-muted-foreground">Node uptime: {fmtUptime(data.data.uptime)} · refreshes in <span class="tabular-nums font-medium">{countdown}s</span></div>
 
-		<!-- Guest table -->
 		{#if data.data.guests.length > 0}
 			<div class="rounded-lg border overflow-hidden">
 				<table class="w-full text-sm">

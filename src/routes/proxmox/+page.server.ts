@@ -40,13 +40,7 @@ async function getQemuIp(host: string, tokenId: string, tokenSecret: string, nod
 	}
 }
 
-// Get IP for an LXC container.
-// Priority:
-//   1. /lxc/{vmid}/interfaces  — live kernel data, returns actual DHCP-assigned IP
-//   2. top-level ip field from the status list (may be "dhcp" placeholder)
-//   3. net0 from /lxc/{vmid}/config (also may be "dhcp" placeholder)
 async function getLxcIp(host: string, tokenId: string, tokenSecret: string, node: string, g: any): Promise<string | null> {
-	// 1. Query the live interfaces endpoint — this is the only reliable source for DHCP leases
 	try {
 		const ifaces: any[] = await pveGet(host, tokenId, tokenSecret, `/nodes/${node}/lxc/${g.vmid}/interfaces`);
 		if (Array.isArray(ifaces)) {
@@ -57,29 +51,23 @@ async function getLxcIp(host: string, tokenId: string, tokenSecret: string, node
 				if (stripped) return stripped;
 			}
 		}
-	} catch {
-		// Not available on older PVE versions or insufficient permissions — fall through
-	}
+	} catch { /* fall through */ }
 
-	// 2. Top-level ip field from the status list
 	if (g.ip) {
 		const stripped = stripCidr(g.ip);
 		if (stripped) return stripped;
 	}
 
-	// 3. Fall back to reading config net0 field
 	try {
 		const config = await pveGet(host, tokenId, tokenSecret, `/nodes/${node}/lxc/${g.vmid}/config`);
 		const net0: string = config?.net0 ?? '';
 		const match = net0.match(/(?:^|,)ip=([^,]+)/);
 		if (match) return stripCidr(match[1]);
-	} catch {
-		// silently ignore
-	}
+	} catch { /* silently ignore */ }
 	return null;
 }
 
-// Module-level server-side cache — avoids re-fetching on every nav click
+// Module-level server-side cache
 let cache: { ts: number; result: any } | null = null;
 const CACHE_TTL_MS = 30_000;
 
@@ -88,7 +76,7 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 
 	const auth = await authorize(cookies);
 	if (auth.authEnabled && !auth.isAuthenticated) {
-		return { error: 'Authentication required', data: null, rrd: null, hasManageToken: false };
+		return { error: 'Authentication required', data: null, rrd: null, hasManageToken: false, proxmoxHost: null };
 	}
 
 	if (cache && Date.now() - cache.ts < CACHE_TTL_MS) {
@@ -106,15 +94,14 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 		]);
 
 		if (!host) {
-			return { notConfigured: true, data: null, rrd: null, hasManageToken: false };
+			return { notConfigured: true, data: null, rrd: null, hasManageToken: false, proxmoxHost: null };
 		}
 
-		// Use whichever token is available — manage token covers everything read token does
-		const effectiveTokenId = tokenId || manageTokenId;
+		const effectiveTokenId     = tokenId     || manageTokenId;
 		const effectiveTokenSecret = tokenSecret || manageTokenSecret;
 
 		if (!effectiveTokenId || !effectiveTokenSecret) {
-			return { notConfigured: true, data: null, rrd: null, hasManageToken: false };
+			return { notConfigured: true, data: null, rrd: null, hasManageToken: false, proxmoxHost: null };
 		}
 
 		const nodeName = node ?? 'pve';
@@ -129,36 +116,34 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 
 		if (nodeStatus.status === 'rejected') throw new Error(nodeStatus.reason?.message ?? 'Failed to fetch node status');
 
-		const ns = nodeStatus.value;
-		const vmsData = vms.status === 'fulfilled' ? (vms.value ?? []) : [];
-		const lxcsData = lxcs.status === 'fulfilled' ? (lxcs.value ?? []) : [];
-		const rrdData = rrdRaw.status === 'fulfilled' ? (rrdRaw.value ?? []) : [];
+		const ns        = nodeStatus.value;
+		const vmsData   = vms.status   === 'fulfilled' ? (vms.value   ?? []) : [];
+		const lxcsData  = lxcs.status  === 'fulfilled' ? (lxcs.value  ?? []) : [];
+		const rrdData   = rrdRaw.status === 'fulfilled' ? (rrdRaw.value ?? []) : [];
 
 		const allGuests = [...vmsData, ...lxcsData];
-		const running = allGuests.filter((g: any) => g.status === 'running');
-		const stopped = allGuests.filter((g: any) => g.status === 'stopped');
+		const running   = allGuests.filter((g: any) => g.status === 'running');
+		const stopped   = allGuests.filter((g: any) => g.status === 'stopped');
 
 		const guestIps: Record<number, string | null> = {};
 		await Promise.all(allGuests.map(async (g: any) => {
 			if (g.status !== 'running') { guestIps[g.vmid] = null; return; }
 			const isLxc = !!lxcsData.find((l: any) => l.vmid === g.vmid);
-			if (isLxc) {
-				guestIps[g.vmid] = await getLxcIp(host, effectiveTokenId, effectiveTokenSecret, nodeName, g);
-			} else {
-				guestIps[g.vmid] = await getQemuIp(host, effectiveTokenId, effectiveTokenSecret, nodeName, g.vmid);
-			}
+			guestIps[g.vmid] = isLxc
+				? await getLxcIp(host, effectiveTokenId, effectiveTokenSecret, nodeName, g)
+				: await getQemuIp(host, effectiveTokenId, effectiveTokenSecret, nodeName, g.vmid);
 		}));
 
-		const memTotal = ns.memory?.total ?? 0;
+		const memTotal  = ns.memory?.total ?? 0;
 		const rrdPoints = rrdData.map((p: any) => {
-			const memUsed = p.memory ?? p.memused ?? null;
-			const memMax  = p.memtotal ?? p.maxmem ?? (memTotal > 0 ? memTotal : null);
+			const memUsed = p.memory   ?? p.memused  ?? null;
+			const memMax  = p.memtotal ?? p.maxmem   ?? (memTotal > 0 ? memTotal : null);
 			return {
-				t: p.time,
-				cpu: p.cpu ?? null,
-				netin: p.netin ?? null,
+				t:      p.time,
+				cpu:    p.cpu    ?? null,
+				netin:  p.netin  ?? null,
 				netout: p.netout ?? null,
-				mem: (memUsed != null && memMax != null && memMax > 0) ? memUsed / memMax : null
+				mem:    (memUsed != null && memMax != null && memMax > 0) ? memUsed / memMax : null
 			};
 		});
 
@@ -166,28 +151,29 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 			notConfigured: false,
 			error: null,
 			hasManageToken,
+			proxmoxHost: host,
 			data: {
 				node: nodeName,
 				cpu: ns.cpu ?? 0,
 				cpuCores: ns.cpuinfo?.cpus ?? 0,
-				memUsed: ns.memory?.used ?? 0,
-				memTotal: ns.memory?.total ?? 0,
-				rootFsUsed: ns.rootfs?.used ?? 0,
-				rootFsTotal: ns.rootfs?.total ?? 0,
-				uptime: ns.uptime ?? 0,
-				vmsRunning: running.length,
-				vmsStopped: stopped.length,
-				vmsTotal: allGuests.length,
+				memUsed:      ns.memory?.used  ?? 0,
+				memTotal:     ns.memory?.total ?? 0,
+				rootFsUsed:   ns.rootfs?.used  ?? 0,
+				rootFsTotal:  ns.rootfs?.total ?? 0,
+				uptime:       ns.uptime ?? 0,
+				vmsRunning:   running.length,
+				vmsStopped:   stopped.length,
+				vmsTotal:     allGuests.length,
 				guests: allGuests.map((g: any) => ({
-					vmid: g.vmid,
-					name: g.name ?? `VM ${g.vmid}`,
+					vmid:   g.vmid,
+					name:   g.name ?? `VM ${g.vmid}`,
 					status: g.status,
-					type: vmsData.find((v: any) => v.vmid === g.vmid) ? 'qemu' : 'lxc',
-					cpu: g.cpu ?? 0,
-					mem: g.mem ?? 0,
+					type:   vmsData.find((v: any) => v.vmid === g.vmid) ? 'qemu' : 'lxc',
+					cpu:    g.cpu    ?? 0,
+					mem:    g.mem    ?? 0,
 					maxmem: g.maxmem ?? 0,
 					uptime: g.uptime ?? null,
-					ip: guestIps[g.vmid] ?? null
+					ip:     guestIps[g.vmid] ?? null
 				}))
 			},
 			rrd: rrdPoints
@@ -199,6 +185,6 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 	} catch (err: any) {
 		console.error('Proxmox page load error:', err);
 		if (cache) return cache.result;
-		return { error: err.message ?? 'Failed to connect to Proxmox', data: null, rrd: null, hasManageToken: false };
+		return { error: err.message ?? 'Failed to connect to Proxmox', data: null, rrd: null, hasManageToken: false, proxmoxHost: null };
 	}
 };
