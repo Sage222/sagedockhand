@@ -335,6 +335,9 @@
 												<button onclick={() => doAction(g.vmid, g.type, 'shutdown')} disabled={actionStatus[g.vmid] === 'loading'} title="Shutdown (graceful)" class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground disabled:opacity-40"><StopCircle class="w-3.5 h-3.5" /></button>
 												<button onclick={() => doAction(g.vmid, g.type, 'stop')} disabled={actionStatus[g.vmid] === 'loading'} title="Stop (force off)" class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-destructive disabled:opacity-40"><Power class="w-3.5 h-3.5" /></button>
 												<button onclick={() => doAction(g.vmid, g.type, g.type === 'lxc' ? 'reboot' : 'reset')} disabled={actionStatus[g.vmid] === 'loading'} title="Restart" class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-yellow-500 disabled:opacity-40"><RotateCcw class="w-3.5 h-3.5" /></button>
+												{#if g.ip}
+													<a href={`/ssh-terminal?host=${encodeURIComponent(g.ip)}&user=root&label=${encodeURIComponent(g.name)}`} target="_blank" rel="noopener noreferrer" title="Open SSH shell to {g.name}" class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-primary"><Terminal class="w-3.5 h-3.5" /></a>
+												{/if}
 											{:else if g.status === 'stopped'}
 												<button onclick={() => doAction(g.vmid, g.type, 'start')} disabled={actionStatus[g.vmid] === 'loading'} title="Start" class="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-green-500 disabled:opacity-40"><Zap class="w-3.5 h-3.5" /></button>
 											{/if}

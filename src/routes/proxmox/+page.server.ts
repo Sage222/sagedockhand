@@ -105,7 +105,8 @@ export const load: PageServerLoad = async ({ cookies, depends }) => {
 		}
 
 		const nodeName = node ?? 'pve';
-		const hasManageToken = !!(manageTokenId && manageTokenSecret);
+		// Use manage token if set, otherwise fall back to the read token (same token with admin rights)
+		const hasManageToken = !!(manageTokenId && manageTokenSecret) || !!(effectiveTokenId && effectiveTokenSecret);
 
 		const [nodeStatus, vms, lxcs, rrdRaw] = await Promise.allSettled([
 			pveGet(host, effectiveTokenId, effectiveTokenSecret, `/nodes/${nodeName}/status`),
