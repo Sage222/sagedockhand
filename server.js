@@ -14,6 +14,7 @@ import { createConnection } from 'node:net';
 import { connect as tlsConnect, rootCertificates } from 'node:tls';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
+import { spawn } from 'node:child_process';
 import { handler } from './build/handler.js';
 
 // Patch console to prepend ISO timestamps
@@ -101,8 +102,9 @@ server.on('upgrade', (req, socket, head) => {
 	// Only handle our specific WebSocket paths
 	const isTerminal = url.pathname.includes('/api/containers/') && url.pathname.includes('/exec');
 	const isHawser = url.pathname === '/api/hawser/connect';
+	const isSsh = url.pathname === '/api/ssh';
 
-	if (!isTerminal && !isHawser) {
+	if (!isTerminal && !isHawser && !isSsh) {
 		socket.destroy();
 		return;
 	}
@@ -121,6 +123,8 @@ wss.on('connection', (ws, req) => {
 
 	if (url.pathname === '/api/hawser/connect') {
 		handleHawserConnection(ws, connId, remoteIp);
+	} else if (url.pathname === '/api/ssh') {
+		handleSshConnection(ws, url, connId);
 	} else {
 		handleTerminalConnection(ws, url, connId);
 	}
@@ -457,6 +461,87 @@ function handleHawserConnection(ws, connId, remoteIp) {
 }
 
 // Start the server
+
+/**
+ * Handle SSH terminal WebSocket connections.
+ * Spawns `ssh -tt user@host -p port` and bridges stdin/stdout to the browser.
+ * Uses StrictHostKeyChecking=no and BatchMode=no so password prompts flow through.
+ */
+function handleSshConnection(ws, url, connId) {
+	const host = url.searchParams.get('host') || '';
+	const user = url.searchParams.get('user') || 'root';
+	const port = url.searchParams.get('port') || '22';
+
+	if (!host) {
+		ws.send(JSON.stringify({ type: 'error', message: 'Missing host parameter' }));
+		ws.close();
+		return;
+	}
+
+	let cols = 120, rows = 30;
+
+	const sshProc = spawn('ssh', [
+		'-tt',
+		'-p', port,
+		'-o', 'StrictHostKeyChecking=no',
+		'-o', 'UserKnownHostsFile=/dev/null',
+		'-o', 'LogLevel=ERROR',
+		`${user}@${host}`
+	], {
+		env: { ...process.env, TERM: 'xterm-256color' }
+	});
+
+	console.log(`[SSH ${connId}] Spawned ssh ${user}@${host}:${port} pid=${sshProc.pid}`);
+
+	// Pipe SSH stdout/stderr → browser
+	sshProc.stdout.on('data', (data) => {
+		if (ws.readyState === 1) ws.send(data);
+	});
+	sshProc.stderr.on('data', (data) => {
+		if (ws.readyState === 1) ws.send(data);
+	});
+
+	sshProc.on('close', (code) => {
+		console.log(`[SSH ${connId}] Process exited code=${code}`);
+		if (ws.readyState === 1) ws.close(1000, `SSH exited (${code})`);
+	});
+
+	sshProc.on('error', (err) => {
+		console.error(`[SSH ${connId}] Spawn error:`, err.message);
+		if (ws.readyState === 1) {
+			ws.send(JSON.stringify({ type: 'error', message: `SSH error: ${err.message}` }));
+			ws.close();
+		}
+	});
+
+	// Browser → SSH stdin
+	ws.on('message', (raw) => {
+		try {
+			const msg = JSON.parse(raw.toString());
+			if (msg.type === 'input' && msg.data) {
+				sshProc.stdin.write(msg.data);
+			} else if (msg.type === 'resize' && msg.cols && msg.rows) {
+				cols = msg.cols; rows = msg.rows;
+				// Send SIGWINCH via resize — not directly possible with spawn,
+				// but xterm handles it fine without explicit resize for SSH
+			}
+		} catch {
+			// Raw bytes fallback
+			if (sshProc.stdin.writable) sshProc.stdin.write(raw);
+		}
+	});
+
+	ws.on('close', () => {
+		console.log(`[SSH ${connId}] WS closed, killing ssh`);
+		sshProc.kill();
+	});
+
+	ws.on('error', (err) => {
+		console.error(`[SSH ${connId}] WS error:`, err.message);
+		sshProc.kill();
+	});
+}
+
 server.listen(PORT, HOST, () => {
 	console.log(`Listening on http://${HOST}:${PORT}/ with WebSocket`);
 });

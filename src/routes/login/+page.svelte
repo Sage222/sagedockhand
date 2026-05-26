@@ -149,7 +149,7 @@
 </script>
 
 <svelte:head>
-	<title>Login - Dockhand</title>
+	<title>SageDockHand</title>
 </svelte:head>
 
 <div class="min-h-screen flex items-center justify-center bg-background p-4">

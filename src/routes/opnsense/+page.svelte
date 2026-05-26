@@ -1,10 +1,10 @@
 <svelte:head>
-	<title>OPNsense - Dockhand</title>
+	<title>SageDockHand</title>
 </svelte:head>
 
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { ShieldCheck, RefreshCw, Cpu, MemoryStick, HardDrive, Clock, Network, Activity, CheckCircle2, XCircle, WifiOff, ChevronRight, ExternalLink } from 'lucide-svelte';
+	import { ShieldCheck, RefreshCw, Cpu, MemoryStick, HardDrive, Clock, Network, Activity, CheckCircle2, XCircle, WifiOff, ChevronRight, ExternalLink, Terminal } from 'lucide-svelte';
 
 	interface OPNsenseData {
 		hostname: string;
@@ -165,6 +165,19 @@
 		</div>
 		<div class="flex items-center gap-2">
 			<span class="text-xs text-muted-foreground tabular-nums">{refreshCountdown}s</span>
+			{#if data?.opnsenseHost}
+				{@const opnsenseIp = (() => { try { return new URL(data.opnsenseHost).hostname; } catch { return data.opnsenseHost; } })()}
+				<a
+					href={`/ssh-terminal?host=${encodeURIComponent(opnsenseIp)}&user=root&label=OPNsense`}
+					target="_blank"
+					rel="noopener noreferrer"
+					class="inline-flex items-center gap-1.5 border text-sm px-3 py-1.5 rounded-md hover:bg-muted transition-colors"
+					title="Open SSH shell to OPNsense"
+				>
+					<Terminal class="w-3.5 h-3.5" />
+					Shell
+				</a>
+			{/if}
 			<button
 				onclick={manualRefresh}
 				disabled={refreshing}

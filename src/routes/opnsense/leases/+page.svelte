@@ -1,5 +1,5 @@
 <svelte:head>
-	<title>DHCP Leases - OPNsense - Dockhand</title>
+	<title>SageDockHand</title>
 </svelte:head>
 
 <script lang="ts">
@@ -36,7 +36,7 @@
 					l.ip.includes(q) ||
 					l.mac.toLowerCase().includes(q) ||
 					l.hostname.toLowerCase().includes(q) ||
-					l.description.toLowerCase().includes(q)
+					false  /* description column removed */
 				)
 			: [...leases];
 		list.sort((a, b) => {
@@ -155,7 +155,7 @@
 				<table class="w-full text-sm">
 					<thead class="bg-muted/50 border-b">
 						<tr>
-							{#each [['ip','IP Address'],['hostname','Hostname'],['mac','MAC Address'],['description','Description'],['interface','Interface'],['state','State'],['end','Expires']] as [key, label]}
+							{#each [['ip','IP Address'],['hostname','Hostname'],['mac','MAC Address'],['interface','Interface'],['state','State'],['end','Expires']] as [key, label]}
 								<th class="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">
 									<button onclick={() => setSort(key as keyof Lease)} class="flex items-center gap-1 hover:text-foreground transition-colors">
 										{label}
@@ -177,7 +177,6 @@
 									{/if}
 								</td>
 								<td class="px-3 py-2 font-mono text-muted-foreground">{lease.mac}</td>
-								<td class="px-3 py-2 text-muted-foreground">{lease.description || '—'}</td>
 								<td class="px-3 py-2 font-mono text-muted-foreground">{lease.interface || '—'}</td>
 								<td class="px-3 py-2">
 									<span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium

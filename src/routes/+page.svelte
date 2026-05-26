@@ -1,5 +1,5 @@
 <svelte:head>
-	<title>Dashboard - Dockhand</title>
+	<title>SageDockHand</title>
 </svelte:head>
 
 <script lang="ts">
@@ -101,12 +101,14 @@
 		try {
 			const res = await fetch('/api/dashboard/stats');
 			const d = await res.json();
-			// Response is an array of per-environment stats
 			const envs: any[] = Array.isArray(d) ? d : [];
-			const running  = envs.reduce((s: number, e: any) => s + (e.containers?.running  ?? 0), 0);
-			const stopped  = envs.reduce((s: number, e: any) => s + (e.containers?.stopped  ?? 0), 0);
-			const total    = envs.reduce((s: number, e: any) => s + (e.containers?.total    ?? 0), 0);
+			const running   = envs.reduce((s: number, e: any) => s + (e.containers?.running  ?? 0), 0);
+			const stopped   = envs.reduce((s: number, e: any) => s + (e.containers?.stopped  ?? 0), 0);
+			const total     = envs.reduce((s: number, e: any) => s + (e.containers?.total    ?? 0), 0);
 			const unhealthy = envs.reduce((s: number, e: any) => s + (e.containers?.unhealthy ?? 0), 0);
+			// Memory: sum across all envs that have metrics
+			const memUsed  = envs.reduce((s: number, e: any) => s + (e.metrics?.memoryUsed  ?? 0), 0);
+			const memTotal = envs.reduce((s: number, e: any) => s + (e.metrics?.memoryTotal ?? 0), 0);
 			cards[i].error = null;
 			cards[i].rows = [
 				{
@@ -115,6 +117,12 @@
 					sub: `${stopped} stopped · ${total} total`,
 					ok: running > 0 && unhealthy === 0
 				},
+				...(memTotal > 0 ? [{
+					label: 'Memory',
+					value: fmtBytes(memUsed),
+					sub: `of ${fmtBytes(memTotal)} · ${Math.round((memUsed / memTotal) * 100)}% used`,
+					ok: (memUsed / memTotal) < 0.9
+				}] : []),
 				...(unhealthy > 0 ? [{
 					label: 'Unhealthy',
 					value: `${unhealthy} container${unhealthy !== 1 ? 's' : ''}`,
@@ -128,6 +136,13 @@
 		} finally {
 			cards[i].loading = false;
 		}
+	}
+
+	function fmtBytes(b: number): string {
+		if (b >= 1e9) return (b / 1e9).toFixed(1) + ' GB';
+		if (b >= 1e6) return (b / 1e6).toFixed(0) + ' MB';
+		if (b >= 1e3) return (b / 1e3).toFixed(0) + ' KB';
+		return b + ' B';
 	}
 
 	function uptimeStr(seconds: number): string {

@@ -123,7 +123,7 @@
 
 <svelte:head>
 	<link rel="icon" href="/logo_light.webp" />
-	<title>Dockhand - Docker Management</title>
+	<title>SageDockHand</title>
 </svelte:head>
 
 {#if isLoginPage}

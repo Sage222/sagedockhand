@@ -910,7 +910,7 @@
 </script>
 
 <svelte:head>
-	<title>Schedules - Dockhand</title>
+	<title>SageDockHand</title>
 </svelte:head>
 
 <div class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">

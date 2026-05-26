@@ -1,5 +1,5 @@
 <svelte:head>
-	<title>Logs - Dockhand</title>
+	<title>SageDockHand</title>
 </svelte:head>
 
 <script lang="ts">

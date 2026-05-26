@@ -346,7 +346,7 @@
 </script>
 
 <svelte:head>
-	<title>Profile - Dockhand</title>
+	<title>SageDockHand</title>
 </svelte:head>
 
 <div class="container mx-auto p-6">

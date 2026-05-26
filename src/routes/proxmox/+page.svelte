@@ -1,5 +1,5 @@
 <svelte:head>
-	<title>Proxmox — Dockhand</title>
+	<title>SageDockHand</title>
 </svelte:head>
 
 <script lang="ts">
@@ -7,7 +7,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import {
 		Server, Cpu, MemoryStick, HardDrive, Play, Square, RefreshCw,
-		AlertCircle, Settings, Power, RotateCcw, StopCircle, Zap, Loader2, ExternalLink
+		AlertCircle, Settings, Power, RotateCcw, StopCircle, Zap, Loader2, ExternalLink, Terminal
 	} from 'lucide-svelte';
 
 	let { data } = $props();
@@ -166,6 +166,18 @@
 			{/if}
 		</div>
 		<div class="flex items-center gap-2">
+			{#if data.proxmoxHost}
+				{@const proxmoxIp = (() => { try { return new URL(data.proxmoxHost).hostname; } catch { return data.proxmoxHost; } })()}
+				<a
+					href={`/ssh-terminal?host=${encodeURIComponent(proxmoxIp)}&user=root&label=Proxmox`}
+					target="_blank"
+					rel="noopener noreferrer"
+					class="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded hover:bg-muted"
+					title="Open SSH shell to Proxmox"
+				>
+					<Terminal class="w-3.5 h-3.5" /><span>Shell</span>
+				</a>
+			{/if}
 			<a href="/settings/proxmox" class="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded hover:bg-muted">
 				<Settings class="w-3.5 h-3.5" /><span>Settings</span>
 			</a>
