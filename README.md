@@ -16,9 +16,11 @@
 
 ## About
 
-WARNING: WORK IN PROGRESS! Currently working in BETA. Add your Proxmox API and Opnsense API details to the Settings Submenu to begin management/monitoring.
+Currently working. Add your Proxmox API and Opnsense API details to the Settings Submenu to begin management/monitoring.
 
 *********** Fork of the awesome Dockhand.  Trying to add proxmox & opnsense management/monitoring.************
+
+Allows you to start/stop/restart VMs. check cpu memory etc for proxmox. Working well. 
 
 
 
