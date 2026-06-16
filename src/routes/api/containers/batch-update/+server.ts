@@ -1,9 +1,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { authorize } from '$lib/server/authorize';
-import { listContainers, pullImage, inspectContainer } from '$lib/server/docker';
+import { listContainers, pullImage, inspectContainer, recreateContainerFromInspect, getImageIdByTag } from '$lib/server/docker';
 import { auditContainer } from '$lib/server/audit';
-import { recreateContainer } from '$lib/server/scheduler/tasks/container-update';
 import { isUpdateDisabledByLabel } from '$lib/server/container-labels';
 
 export interface BatchUpdateResult {
@@ -74,7 +73,7 @@ export const POST: RequestHandler = async (event) => {
 					continue;
 				}
 
-				// Pull latest image first
+				// Pull latest image first so Docker cache has the newest digest
 				try {
 					await pullImage(imageName, undefined, envIdNum);
 				} catch (pullError: any) {
@@ -87,23 +86,26 @@ export const POST: RequestHandler = async (event) => {
 					continue;
 				}
 
+				// Re-inspect AFTER pull so we have current state, then recreate
+				// using recreateContainerFromInspect directly — this passes the image
+				// name explicitly so Docker uses the freshly pulled digest, not the
+				// stale image ID that was baked into the old container config.
 				let newContainerId = containerId;
-
-				const recreateResult = await recreateContainer(containerName, envIdNum);
-				if (recreateResult.success) {
-					const updatedContainers = await listContainers(true, envIdNum);
-					const updatedContainer = updatedContainers.find(c => c.name === containerName);
-					if (updatedContainer) {
-						newContainerId = updatedContainer.id;
-					}
-				}
-
-				if (!recreateResult.success) {
+				try {
+					const freshInspect = await inspectContainer(containerId, envIdNum) as any;
+					const newContainer = await recreateContainerFromInspect(
+						freshInspect,
+						imageName,
+						envIdNum,
+						(msg: string) => console.log(`[batch-update] ${containerName}: ${msg}`)
+					);
+					newContainerId = newContainer.Id;
+				} catch (recreateError: any) {
 					results.push({
 						containerId,
 						containerName,
 						success: false,
-						error: recreateResult.error || 'Container recreation failed'
+						error: `Recreate failed: ${recreateError.message}`
 					});
 					continue;
 				}
