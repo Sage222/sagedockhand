@@ -288,7 +288,7 @@ export const gitRepositories = sqliteTable('git_repositories', {
 	url: text('url').notNull(),
 	branch: text('branch').default('main'),
 	credentialId: integer('credential_id').references(() => gitCredentials.id, { onDelete: 'set null' }),
-	composePath: text('compose_path').default('compose.yaml'),
+	composePath: text('compose_path').default('docker-compose.yml'), // Reverted to original value (#1110)
 	environmentId: integer('environment_id'),
 	autoUpdate: integer('auto_update', { mode: 'boolean' }).default(false),
 	autoUpdateSchedule: text('auto_update_schedule').default('daily'),
@@ -308,7 +308,7 @@ export const gitStacks = sqliteTable('git_stacks', {
 	stackName: text('stack_name').notNull(),
 	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
 	repositoryId: integer('repository_id').notNull().references(() => gitRepositories.id, { onDelete: 'cascade' }),
-	composePath: text('compose_path').default('compose.yaml'),
+	composePath: text('compose_path').default('docker-compose.yml'), // Reverted to original value (#1110)
 	envFilePath: text('env_file_path'), // Path to .env file in repository (e.g., ".env", "config/.env.prod")
 	autoUpdate: integer('auto_update', { mode: 'boolean' }).default(false),
 	autoUpdateSchedule: text('auto_update_schedule').default('daily'),
@@ -324,6 +324,7 @@ export const gitStacks = sqliteTable('git_stacks', {
 	lastCommit: text('last_commit'),
 	syncStatus: text('sync_status').default('pending'),
 	syncError: text('sync_error'),
+	syncedFiles: text('synced_files'), // JSON manifest { relativePath: sha256hex } of files written on last sync
 	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`),
 	updatedAt: text('updated_at').default(sql`CURRENT_TIMESTAMP`)
 }, (table) => ({

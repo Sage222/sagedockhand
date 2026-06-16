@@ -9,6 +9,7 @@
 	import { onMount } from 'svelte';
 	import { appendEnvParam } from '$lib/stores/environment';
 	import { watchJob } from '$lib/utils/sse-fetch';
+	import { formatBytes } from '$lib/utils/format';
 
 	interface LayerProgress {
 		id: string;
@@ -96,12 +97,6 @@
 	function toggleLogTheme() {
 		logDarkMode = !logDarkMode;
 		localStorage.setItem('logTheme', logDarkMode ? 'dark' : 'light');
-	}
-
-	function formatBytes(bytes: number): string {
-		if (bytes < 1024) return `${bytes} B`;
-		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 	}
 
 	function formatDuration(ms: number): string {
@@ -314,7 +309,7 @@
 					class="h-10"
 				>
 					{#if isPulling}
-						<Loader2 class="w-4 h-4 mr-2 animate-spin" />
+						<Download class="w-4 h-4 mr-2 animate-spin" />
 						Pulling...
 					{:else}
 						<Download class="w-4 h-4" />
@@ -332,7 +327,7 @@
 			<div class="flex items-center justify-between">
 				<div class="flex items-center gap-2">
 					{#if status === 'pulling'}
-						<Loader2 class="w-4 h-4 animate-spin text-blue-600" />
+						<Download class="w-4 h-4 animate-spin text-blue-600" />
 						<span class="text-sm">Pulling layers...</span>
 					{:else if status === 'complete'}
 						<CheckCircle2 class="w-4 h-4 text-green-600" />

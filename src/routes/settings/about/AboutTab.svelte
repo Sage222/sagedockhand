@@ -8,10 +8,12 @@
 	import * as Tabs from '$lib/components/ui/tabs';
 	import { onMount, onDestroy } from 'svelte';
 	import { licenseStore } from '$lib/stores/license';
+	import { formatBytes } from '$lib/utils/format';
 	import { browser } from '$app/environment';
 	import LicenseModal from './LicenseModal.svelte';
 	import PrivacyModal from './PrivacyModal.svelte';
 	import SelfUpdateDialog from './SelfUpdateDialog.svelte';
+	import ChangelogText from '$lib/components/ChangelogText.svelte';
 
 	interface Dependency {
 		name: string;
@@ -349,11 +351,6 @@
 		setTimeout(() => {
 			isJumping = false;
 		}, 800);
-	}
-
-	function formatBytes(bytes: number): string {
-		const gb = bytes / (1024 * 1024 * 1024);
-		return `${gb.toFixed(1)} GB`;
 	}
 
 	async function fetchSystemInfo() {
@@ -812,7 +809,7 @@
 															Fix
 														</span>
 													{/if}
-													<span>{change.text}</span>
+													<ChangelogText text={change.text} />
 												</li>
 											{/each}
 										</ul>

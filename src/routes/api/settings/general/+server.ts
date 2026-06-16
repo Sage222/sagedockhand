@@ -58,7 +58,8 @@ export interface GeneralSettings {
 	eventCleanupEnabled: boolean;
 	scannerCleanupCron: string;
 	scannerCleanupEnabled: boolean;
-	logBufferSizeKb: number;
+	logBufferSizeKb: number;  // legacy
+	logMaxLines: number;       // line-count cap for log buffer
 	defaultTimezone: string;
 	// Background monitoring settings
 	eventCollectionMode: EventCollectionMode;
@@ -89,6 +90,8 @@ export interface GeneralSettings {
 	defaultComposeTemplate: string;
 	// Label filter mode
 	labelFilterMode: 'any' | 'all';
+	// Whether spinning icons (animate-spin etc.) are animated (#1169)
+	animateIcons: boolean;
 }
 
 const DEFAULT_SETTINGS: Omit<GeneralSettings, 'scheduleRetentionDays' | 'eventRetentionDays' | 'scheduleCleanupCron' | 'eventCleanupCron' | 'scheduleCleanupEnabled' | 'eventCleanupEnabled' | 'scannerCleanupCron' | 'scannerCleanupEnabled'> = {
@@ -101,6 +104,7 @@ const DEFAULT_SETTINGS: Omit<GeneralSettings, 'scheduleRetentionDays' | 'eventRe
 	defaultGrypeArgs: '-o json -v {image}',
 	defaultTrivyArgs: 'image --format json {image}',
 	logBufferSizeKb: 500,
+	logMaxLines: 2000,
 	defaultTimezone: 'UTC',
 	eventCollectionMode: 'stream',
 	eventPollInterval: 60000,
@@ -120,6 +124,7 @@ const DEFAULT_SETTINGS: Omit<GeneralSettings, 'scheduleRetentionDays' | 'eventRe
 	defaultGrypeImage: DEFAULT_GRYPE_IMAGE,
 	defaultTrivyImage: DEFAULT_TRIVY_IMAGE,
 	labelFilterMode: 'any' as const,
+	animateIcons: true,
 	defaultComposeTemplate: `version: "3.8"
 
 services:
@@ -177,6 +182,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			scannerCleanupCron,
 			scannerCleanupEnabled,
 			logBufferSizeKb,
+			logMaxLines,
 			defaultTimezone,
 			eventCollectionMode,
 			eventPollInterval,
@@ -196,7 +202,8 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			defaultGrypeImage,
 			defaultTrivyImage,
 			defaultComposeTemplate,
-			labelFilterMode
+			labelFilterMode,
+			animateIcons
 		] = await Promise.all([
 			getSetting('confirm_destructive'),
 			getSetting('show_stopped_containers'),
@@ -215,6 +222,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			getScannerCleanupCron(),
 			getScannerCleanupEnabled(),
 			getSetting('log_buffer_size_kb'),
+			getSetting('log_max_lines'),
 			getDefaultTimezone(),
 			getEventCollectionMode(),
 			getEventPollInterval(),
@@ -234,7 +242,8 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			getSetting('default_grype_image'),
 			getSetting('default_trivy_image'),
 			getSetting('default_compose_template'),
-			getSetting('label_filter_mode')
+			getSetting('label_filter_mode'),
+			getSetting('animate_icons')
 		]);
 
 		const settings: GeneralSettings = {
@@ -255,6 +264,9 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			scannerCleanupCron,
 			scannerCleanupEnabled,
 			logBufferSizeKb: logBufferSizeKb ?? DEFAULT_SETTINGS.logBufferSizeKb,
+			logMaxLines: (typeof logMaxLines === 'number' && logMaxLines > 0)
+				? Math.min(2000, Math.max(100, logMaxLines))
+				: Math.min(2000, Math.max(100, Math.round((logBufferSizeKb ?? DEFAULT_SETTINGS.logBufferSizeKb) * 8))),
 			defaultTimezone: defaultTimezone ?? DEFAULT_SETTINGS.defaultTimezone,
 			eventCollectionMode: (eventCollectionMode ?? DEFAULT_SETTINGS.eventCollectionMode) as EventCollectionMode,
 			eventPollInterval: eventPollInterval ?? DEFAULT_SETTINGS.eventPollInterval,
@@ -274,7 +286,8 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			defaultGrypeImage: defaultGrypeImage ?? DEFAULT_GRYPE_IMAGE,
 			defaultTrivyImage: defaultTrivyImage ?? DEFAULT_TRIVY_IMAGE,
 			defaultComposeTemplate: defaultComposeTemplate ?? DEFAULT_SETTINGS.defaultComposeTemplate,
-			labelFilterMode: labelFilterMode ?? DEFAULT_SETTINGS.labelFilterMode
+			labelFilterMode: labelFilterMode ?? DEFAULT_SETTINGS.labelFilterMode,
+			animateIcons: animateIcons ?? DEFAULT_SETTINGS.animateIcons
 		};
 
 		return json(settings);
@@ -292,7 +305,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 
 	try {
 		const body = await request.json();
-		const { confirmDestructive, showStoppedContainers, highlightUpdates, timeFormat, dateFormat, downloadFormat, defaultGrypeArgs, defaultTrivyArgs, scheduleRetentionDays, eventRetentionDays, scheduleCleanupCron, eventCleanupCron, scheduleCleanupEnabled, eventCleanupEnabled, scannerCleanupCron, scannerCleanupEnabled, logBufferSizeKb, defaultTimezone, eventCollectionMode, eventPollInterval, metricsCollectionInterval, lightTheme, darkTheme, font, fontSize, gridFontSize, terminalFont, editorFont, compactPorts, showExposedPorts, formatLogTimestamps, externalStackPaths, primaryStackLocation, defaultGrypeImage, defaultTrivyImage, defaultComposeTemplate, labelFilterMode } = body;
+		const { confirmDestructive, showStoppedContainers, highlightUpdates, timeFormat, dateFormat, downloadFormat, defaultGrypeArgs, defaultTrivyArgs, scheduleRetentionDays, eventRetentionDays, scheduleCleanupCron, eventCleanupCron, scheduleCleanupEnabled, eventCleanupEnabled, scannerCleanupCron, scannerCleanupEnabled, logBufferSizeKb, logMaxLines, defaultTimezone, eventCollectionMode, eventPollInterval, metricsCollectionInterval, lightTheme, darkTheme, font, fontSize, gridFontSize, terminalFont, editorFont, compactPorts, showExposedPorts, formatLogTimestamps, externalStackPaths, primaryStackLocation, defaultGrypeImage, defaultTrivyImage, defaultComposeTemplate, labelFilterMode, animateIcons } = body;
 
 		if (confirmDestructive !== undefined) {
 			await setSetting('confirm_destructive', confirmDestructive);
@@ -345,8 +358,12 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			await refreshSystemJobs();
 		}
 		if (logBufferSizeKb !== undefined && typeof logBufferSizeKb === 'number') {
-			// Clamp to reasonable range: 100KB - 5000KB (5MB)
+			// Legacy: clamp to 100KB-5MB range.
 			await setSetting('log_buffer_size_kb', Math.max(100, Math.min(5000, logBufferSizeKb)));
+		}
+		if (logMaxLines !== undefined && typeof logMaxLines === 'number') {
+			// Clamp to 100 - 50000 lines.
+			await setSetting('log_max_lines', Math.max(100, Math.min(2000, logMaxLines)));
 		}
 		if (defaultTimezone !== undefined && typeof defaultTimezone === 'string') {
 			await setDefaultTimezone(defaultTimezone);
@@ -428,6 +445,9 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 		if (labelFilterMode !== undefined && (labelFilterMode === 'any' || labelFilterMode === 'all')) {
 			await setSetting('label_filter_mode', labelFilterMode);
 		}
+		if (animateIcons !== undefined && typeof animateIcons === 'boolean') {
+			await setSetting('animate_icons', animateIcons);
+		}
 
 		// Fetch all settings in parallel for the response
 		const [
@@ -448,6 +468,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			scannerCleanupCronVal,
 			scannerCleanupEnabledVal,
 			logBufferSizeKbVal,
+			logMaxLinesVal,
 			defaultTimezoneVal,
 			eventCollectionModeVal,
 			eventPollIntervalVal,
@@ -467,7 +488,8 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			defaultGrypeImageVal,
 			defaultTrivyImageVal,
 			defaultComposeTemplateVal,
-			labelFilterModeVal
+			labelFilterModeVal,
+			animateIconsVal
 		] = await Promise.all([
 			getSetting('confirm_destructive'),
 			getSetting('show_stopped_containers'),
@@ -486,6 +508,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			getScannerCleanupCron(),
 			getScannerCleanupEnabled(),
 			getSetting('log_buffer_size_kb'),
+			getSetting('log_max_lines'),
 			getDefaultTimezone(),
 			getEventCollectionMode(),
 			getEventPollInterval(),
@@ -505,7 +528,8 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			getSetting('default_grype_image'),
 			getSetting('default_trivy_image'),
 			getSetting('default_compose_template'),
-			getSetting('label_filter_mode')
+			getSetting('label_filter_mode'),
+			getSetting('animate_icons')
 		]);
 
 		const settings: GeneralSettings = {
@@ -526,6 +550,9 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			scannerCleanupCron: scannerCleanupCronVal,
 			scannerCleanupEnabled: scannerCleanupEnabledVal,
 			logBufferSizeKb: logBufferSizeKbVal ?? DEFAULT_SETTINGS.logBufferSizeKb,
+			logMaxLines: (typeof logMaxLinesVal === 'number' && logMaxLinesVal > 0)
+				? Math.min(2000, Math.max(100, logMaxLinesVal))
+				: Math.min(2000, Math.max(100, Math.round((logBufferSizeKbVal ?? DEFAULT_SETTINGS.logBufferSizeKb) * 8))),
 			defaultTimezone: defaultTimezoneVal ?? DEFAULT_SETTINGS.defaultTimezone,
 			eventCollectionMode: (eventCollectionModeVal ?? DEFAULT_SETTINGS.eventCollectionMode) as EventCollectionMode,
 			eventPollInterval: eventPollIntervalVal ?? DEFAULT_SETTINGS.eventPollInterval,
@@ -545,7 +572,8 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			defaultGrypeImage: defaultGrypeImageVal ?? DEFAULT_GRYPE_IMAGE,
 			defaultTrivyImage: defaultTrivyImageVal ?? DEFAULT_TRIVY_IMAGE,
 			defaultComposeTemplate: defaultComposeTemplateVal ?? DEFAULT_SETTINGS.defaultComposeTemplate,
-			labelFilterMode: labelFilterModeVal ?? DEFAULT_SETTINGS.labelFilterMode
+			labelFilterMode: labelFilterModeVal ?? DEFAULT_SETTINGS.labelFilterMode,
+			animateIcons: animateIconsVal ?? DEFAULT_SETTINGS.animateIcons
 		};
 
 		return json(settings);

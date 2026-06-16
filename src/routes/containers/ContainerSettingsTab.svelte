@@ -1,11 +1,17 @@
 <script lang="ts">
 	import * as Select from '$lib/components/ui/select';
+	import * as Popover from '$lib/components/ui/popover';
+	import * as Command from '$lib/components/ui/command';
+	import { tick } from 'svelte';
 	import { Label } from '$lib/components/ui/label';
 	import { Input } from '$lib/components/ui/input';
 	import { Button } from '$lib/components/ui/button';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { TogglePill, ToggleGroup } from '$lib/components/ui/toggle-pill';
-	import { Plus, Trash2, Settings2, RefreshCw, Network, X, Ban, RotateCw, AlertTriangle, PauseCircle, Share2, Server, CircleOff, ChevronDown, ChevronRight, Cpu, Shield, HeartPulse, Wifi, HardDrive, Lock, Loader2, CheckCircle2, Package, Gpu, Search } from 'lucide-svelte';
+	import { Plus, Trash2, Settings2, RefreshCw, Network, X, Ban, RotateCw, AlertTriangle, PauseCircle, Share2, Server, CircleOff, Box, ChevronDown, ChevronsUpDown, Check, ChevronRight, Cpu, Shield, HeartPulse, Wifi, HardDrive, Lock, Loader2, CheckCircle2, Package, Gpu, Search, CircleHelp, CornerDownLeft } from 'lucide-svelte';
+	import { toast } from 'svelte-sonner';
+	import { parseMemory, parseNanoCpus, parsePositiveInt } from '$lib/utils/container-resources';
+	import { parseHostPort, validatePort, validateIp, formatHostPort, expandPortBindings } from '$lib/utils/port-parse';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { currentEnvironment } from '$lib/stores/environment';
 	import { Badge } from '$lib/components/ui/badge';
@@ -62,6 +68,13 @@
 		driver: string;
 	}
 
+	interface ContainerItem {
+		id: string;
+		name: string;
+		image: string;
+		state: string;
+	}
+
 	interface NetworkEndpointConfig {
 		ipv4Address: string;
 		ipv6Address: string;
@@ -88,7 +101,6 @@
 		// Labels
 		labels: { key: string; value: string }[];
 		// Networks
-		availableNetworks: DockerNetwork[];
 		selectedNetworks: string[];
 		networkConfigs: Record<string, NetworkEndpointConfig>;
 		macAddress: string;
@@ -149,6 +161,11 @@
 			totalVulnerabilities?: number;
 			hasCriticalOrHigh?: boolean;
 		};
+		// Edit mode specific — needed for inline "Apply" in-place updates
+		// (restart policy, CPU/memory limits) without recreating the container.
+		// Omitted in create mode; the per-field Apply buttons are hidden then.
+		containerId?: string;
+		envId?: number;
 	}
 
 	let {
@@ -165,7 +182,6 @@
 		volumeMappings = $bindable(),
 		envVars = $bindable(),
 		labels = $bindable(),
-		availableNetworks,
 		selectedNetworks = $bindable(),
 		networkConfigs = $bindable(),
 		macAddress = $bindable(),
@@ -204,8 +220,117 @@
 		configSets,
 		selectedConfigSetId = $bindable(),
 		errors = $bindable(),
-		imageSummary
+		imageSummary,
+		containerId,
+		envId
 	}: Props = $props();
+
+	// Fetch networks and containers from current environment
+	let availableNetworks = $state<DockerNetwork[]>([]);
+	let availableContainers = $state<ContainerItem[]>([]);
+
+	// Container picker (Popover + Command combobox)
+	let containerPickerOpen = $state(false);
+	let containerPickerTriggerRef = $state<HTMLButtonElement>(null!);
+
+	function closeAndFocusContainerPicker() {
+		containerPickerOpen = false;
+		tick().then(() => containerPickerTriggerRef?.focus());
+	}
+
+	// Networks picker (Popover + Command combobox)
+	let networkPickerOpen = $state(false);
+	let networkPickerTriggerRef = $state<HTMLButtonElement>(null!);
+
+	function closeAndFocusNetworkPicker() {
+		networkPickerOpen = false;
+		tick().then(() => networkPickerTriggerRef?.focus());
+	}
+
+	async function fetchNetworks() {
+		try {
+			const envParam = $currentEnvironment ? `?env=${$currentEnvironment.id}` : '';
+			const response = await fetch(`/api/networks${envParam}`);
+			if (response.ok) {
+				availableNetworks = await response.json();
+			}
+		} catch (err) {
+			console.error('Failed to fetch networks:', err);
+		}
+	}
+
+	async function fetchContainers() {
+		try {
+			const envParam = $currentEnvironment ? `?env=${$currentEnvironment.id}` : '';
+			const response = await fetch(`/api/containers${envParam}`);
+			if (response.ok) {
+				const containers: any[] = await response.json();
+				availableContainers = containers
+					.map(c => ({
+						id: c.id,
+						name: c.name,
+						image: c.image,
+						state: c.state
+					}))
+					.filter(c => c.name && c.name !== name);
+			}
+		} catch (err) {
+			console.error('Failed to fetch containers:', err);
+		}
+	}
+
+	// Fetch both on mount so the dropdowns are ready when the user opens them
+	fetchNetworks();
+	fetchContainers();
+
+	// Container network mode helpers
+	// `networkModeType` reduces the raw NetworkMode to a logical group for branching:
+	//   bridge | host | none | container | custom
+	const networkModeType = $derived.by(() => {
+		if (networkMode.startsWith('container:')) return 'container';
+		if (['bridge', 'host', 'none'].includes(networkMode)) return networkMode;
+		return 'custom';
+	});
+	// Raw value from networkMode — Docker stores either a name or a 64-char container ID
+	const containerRefRaw = $derived(networkMode.startsWith('container:') ? networkMode.slice('container:'.length) : '');
+	// Resolve ID → name when possible so the trigger shows "container:redis" not "container:<sha>"
+	const containerRef = $derived.by(() => {
+		if (!containerRefRaw) return '';
+		const match = availableContainers.find(c => c.id === containerRefRaw || c.id.startsWith(containerRefRaw));
+		return match ? match.name : containerRefRaw;
+	});
+
+	// Network mode picker (Popover + Command combobox) — flat list of bridge/host/none/Container + custom networks
+	let networkModePickerOpen = $state(false);
+	let networkModePickerTriggerRef = $state<HTMLButtonElement>(null!);
+
+	function closeAndFocusNetworkModePicker() {
+		networkModePickerOpen = false;
+		tick().then(() => networkModePickerTriggerRef?.focus());
+	}
+
+	// Additional networks: custom networks NOT used as the primary mode and NOT already attached
+	const selectableNetworks = $derived(
+		availableNetworks.filter(n =>
+			!selectedNetworks.includes(n.name) &&
+			!['bridge', 'host', 'none'].includes(n.name) &&
+			n.name !== networkMode  // exclude the primary
+		)
+	);
+
+	// Custom networks available for the primary mode picker
+	const customNetworks = $derived(
+		availableNetworks.filter(n => !['bridge', 'host', 'none'].includes(n.name))
+	);
+
+	// Display label for the current network mode in the trigger
+	const networkModeLabel = $derived.by(() => {
+		if (networkModeType === 'bridge') return 'Bridge';
+		if (networkModeType === 'host') return 'Host';
+		if (networkModeType === 'none') return 'None';
+		if (networkModeType === 'container') return containerRef ? `Container: ${containerRef}` : 'Container';
+		return networkMode;  // custom network name
+	});
 
 	// Expanded network config rows
 	let expandedNetworks = $state<Set<string>>(new Set());
@@ -305,15 +430,19 @@
 			// Also consider ports already typed in the form
 			for (let i = 0; i < portMappings.length; i++) {
 				if (i !== index && portMappings[i].hostPort) {
-					usedPorts.add(parseInt(portMappings[i].hostPort));
+					const p = parseHostPort(portMappings[i].hostPort);
+					const num = parseInt(p.hostPort);
+					if (!isNaN(num)) usedPorts.add(num);
 				}
 			}
 
-			const startFrom = parseInt(portMappings[index].hostPort) || 8080;
+			const currentParsed = parseHostPort(portMappings[index].hostPort);
+			const startFrom = parseInt(currentParsed.hostPort) || 8080;
 			let port = startFrom;
 			while (usedPorts.has(port) && port < 65535) port++;
 			if (port <= 65535) {
-				portMappings[index].hostPort = String(port);
+				// Preserve IP prefix if present
+				portMappings[index].hostPort = formatHostPort(currentParsed.hostIp, String(port));
 			}
 		} catch {
 			// Silently fail
@@ -529,6 +658,111 @@
 		}
 	}
 
+	// ---------------------------------------------------------------------
+	// In-place ("live") property updates — restart policy + resource limits.
+	// Calls POST /api/containers/[id]/update-runtime which wraps Docker's
+	// /containers/{id}/update endpoint. ONLY the property fields documented
+	// in IN_PLACE_UPDATE_FIELDS (see docker.ts) are eligible — anything else
+	// would silently fail or, worse, look like it worked. Apply buttons next
+	// to those fields call this helper; the rest of the form still requires
+	// the bottom Save button which recreates the container.
+	// ---------------------------------------------------------------------
+	type InPlaceFieldKey = 'restart' | 'memory' | 'memoryReservation' | 'nanoCpus' | 'cpuShares' | 'cpuQuota' | 'cpuPeriod' | 'pidsLimit';
+	let applyingField = $state<InPlaceFieldKey | null>(null);
+
+	/** True when this tab is wired for in-place updates (edit mode + we have an id). */
+	const canApplyInPlace = $derived(mode === 'edit' && !!containerId);
+
+	async function applyInPlace(field: InPlaceFieldKey, body: Record<string, unknown>) {
+		if (!canApplyInPlace || !containerId) return;
+		applyingField = field;
+		try {
+			const url = `/api/containers/${containerId}/update-runtime${envId ? `?env=${envId}` : ''}`;
+			const res = await fetch(url, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body)
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) {
+				toast.error(data.error || 'Update failed');
+				return;
+			}
+			toast.success('Applied — no restart needed');
+			// Surface Docker warnings (e.g. "Memory swap will fall back to ...") inline.
+			if (Array.isArray(data.warnings) && data.warnings.length > 0) {
+				for (const w of data.warnings) toast.warning(w);
+			}
+		} catch (err: any) {
+			toast.error(err?.message || 'Update failed');
+		} finally {
+			applyingField = null;
+		}
+	}
+
+	function applyRestartPolicy() {
+		const payload: Record<string, unknown> = { Name: restartPolicy };
+		if (restartPolicy === 'on-failure' && restartMaxRetries !== '' && restartMaxRetries !== null) {
+			payload.MaximumRetryCount = Number(restartMaxRetries);
+		}
+		return applyInPlace('restart', { RestartPolicy: payload });
+	}
+
+	function applyMemoryLimit() {
+		const bytes = parseMemory(memoryLimit);
+		if (memoryLimit && bytes === undefined) {
+			toast.error('Invalid memory value (e.g. 512m, 1g)');
+			return;
+		}
+		// Docker uses 0 to clear an existing limit.
+		return applyInPlace('memory', { Memory: bytes ?? 0 });
+	}
+
+	function applyMemoryReservation() {
+		const bytes = parseMemory(memoryReservation);
+		if (memoryReservation && bytes === undefined) {
+			toast.error('Invalid memory value');
+			return;
+		}
+		return applyInPlace('memoryReservation', { MemoryReservation: bytes ?? 0 });
+	}
+
+	function applyNanoCpus() {
+		const n = parseNanoCpus(nanoCpus);
+		if (nanoCpus && n === undefined) {
+			toast.error('Invalid CPU limit (e.g. 0.5, 1.5, 2)');
+			return;
+		}
+		return applyInPlace('nanoCpus', { NanoCpus: n ?? 0 });
+	}
+
+	function applyCpuShares() {
+		const n = parsePositiveInt(cpuShares);
+		if (cpuShares && n === undefined) {
+			toast.error('Invalid CPU shares');
+			return;
+		}
+		return applyInPlace('cpuShares', { CpuShares: n ?? 0 });
+	}
+
+	function applyCpuQuota() {
+		const n = parsePositiveInt(cpuQuota);
+		if (cpuQuota && n === undefined) {
+			toast.error('Invalid CPU quota');
+			return;
+		}
+		return applyInPlace('cpuQuota', { CpuQuota: n ?? 0 });
+	}
+
+	function applyCpuPeriod() {
+		const n = parsePositiveInt(cpuPeriod);
+		if (cpuPeriod && n === undefined) {
+			toast.error('Invalid CPU period');
+			return;
+		}
+		return applyInPlace('cpuPeriod', { CpuPeriod: n ?? 0 });
+	}
+
 	function getDriverBadgeClasses(driver: string): string {
 		const base = 'text-2xs px-1.5 py-0.5 rounded font-medium';
 		switch (driver.toLowerCase()) {
@@ -655,48 +889,67 @@
 		<div class="grid grid-cols-2 gap-3">
 			<div class="space-y-1.5">
 				<Label class="text-xs font-medium">Restart policy</Label>
-				<Select.Root type="single" bind:value={restartPolicy}>
-					<Select.Trigger id="restartPolicy" tabindex={0} class="w-full h-9">
-						<span class="flex items-center">
-							{#if restartPolicy === 'no'}
-								<Ban class="w-3.5 h-3.5 mr-2 text-muted-foreground" />
-							{:else if restartPolicy === 'always'}
-								<RotateCw class="w-3.5 h-3.5 mr-2 text-green-500" />
-							{:else if restartPolicy === 'on-failure'}
-								<AlertTriangle class="w-3.5 h-3.5 mr-2 text-amber-500" />
+				<div class="flex items-center gap-1.5">
+					<Select.Root type="single" bind:value={restartPolicy}>
+						<Select.Trigger id="restartPolicy" tabindex={0} class="w-full h-9">
+							<span class="flex items-center">
+								{#if restartPolicy === 'no'}
+									<Ban class="w-3.5 h-3.5 mr-2 text-muted-foreground" />
+								{:else if restartPolicy === 'always'}
+									<RotateCw class="w-3.5 h-3.5 mr-2 text-green-500" />
+								{:else if restartPolicy === 'on-failure'}
+									<AlertTriangle class="w-3.5 h-3.5 mr-2 text-amber-500" />
+								{:else}
+									<PauseCircle class="w-3.5 h-3.5 mr-2 text-blue-500" />
+								{/if}
+								{restartPolicy === 'no' ? 'No' : restartPolicy === 'always' ? 'Always' : restartPolicy === 'on-failure' ? 'On failure' : 'Unless stopped'}
+							</span>
+						</Select.Trigger>
+						<Select.Content>
+							<Select.Item value="no">
+								{#snippet children()}
+									<Ban class="w-3.5 h-3.5 mr-2 text-muted-foreground" />
+									No
+								{/snippet}
+							</Select.Item>
+							<Select.Item value="always">
+								{#snippet children()}
+									<RotateCw class="w-3.5 h-3.5 mr-2 text-green-500" />
+									Always
+								{/snippet}
+							</Select.Item>
+							<Select.Item value="on-failure">
+								{#snippet children()}
+									<AlertTriangle class="w-3.5 h-3.5 mr-2 text-amber-500" />
+									On failure
+								{/snippet}
+							</Select.Item>
+							<Select.Item value="unless-stopped">
+								{#snippet children()}
+									<PauseCircle class="w-3.5 h-3.5 mr-2 text-blue-500" />
+									Unless stopped
+								{/snippet}
+							</Select.Item>
+						</Select.Content>
+					</Select.Root>
+					{#if canApplyInPlace}
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							class="h-9 shrink-0 px-2"
+							disabled={applyingField !== null}
+							onclick={applyRestartPolicy}
+							title="Apply"
+						>
+							{#if applyingField === 'restart'}
+								<Loader2 class="w-3.5 h-3.5 animate-spin" />
 							{:else}
-								<PauseCircle class="w-3.5 h-3.5 mr-2 text-blue-500" />
+								<CornerDownLeft class="w-3.5 h-3.5" />
 							{/if}
-							{restartPolicy === 'no' ? 'No' : restartPolicy === 'always' ? 'Always' : restartPolicy === 'on-failure' ? 'On failure' : 'Unless stopped'}
-						</span>
-					</Select.Trigger>
-					<Select.Content>
-						<Select.Item value="no">
-							{#snippet children()}
-								<Ban class="w-3.5 h-3.5 mr-2 text-muted-foreground" />
-								No
-							{/snippet}
-						</Select.Item>
-						<Select.Item value="always">
-							{#snippet children()}
-								<RotateCw class="w-3.5 h-3.5 mr-2 text-green-500" />
-								Always
-							{/snippet}
-						</Select.Item>
-						<Select.Item value="on-failure">
-							{#snippet children()}
-								<AlertTriangle class="w-3.5 h-3.5 mr-2 text-amber-500" />
-								On failure
-							{/snippet}
-						</Select.Item>
-						<Select.Item value="unless-stopped">
-							{#snippet children()}
-								<PauseCircle class="w-3.5 h-3.5 mr-2 text-blue-500" />
-								Unless stopped
-							{/snippet}
-						</Select.Item>
-					</Select.Content>
-				</Select.Root>
+						</Button>
+					{/if}
+				</div>
 				{#if restartPolicy === 'on-failure'}
 					<div class="space-y-1.5 mt-2">
 						<Label class="text-xs font-medium">Max retry count</Label>
@@ -713,41 +966,121 @@
 			</div>
 
 			<div class="space-y-1.5">
-				<Label class="text-xs font-medium">Network mode</Label>
-				<Select.Root type="single" bind:value={networkMode}>
-					<Select.Trigger id="networkMode" tabindex={0} class="w-full h-9">
-						<span class="flex items-center">
-							{#if networkMode === 'bridge'}
-								<Share2 class="w-3.5 h-3.5 mr-2 text-emerald-500" />
-							{:else if networkMode === 'host'}
-								<Server class="w-3.5 h-3.5 mr-2 text-sky-500" />
-							{:else}
-								<CircleOff class="w-3.5 h-3.5 mr-2 text-muted-foreground" />
-							{/if}
-							{networkMode === 'bridge' ? 'Bridge' : networkMode === 'host' ? 'Host' : 'None'}
-						</span>
-					</Select.Trigger>
-					<Select.Content>
-						<Select.Item value="bridge">
-							{#snippet children()}
-								<Share2 class="w-3.5 h-3.5 mr-2 text-emerald-500" />
-								Bridge
+				<Label class="text-xs font-medium">Network</Label>
+				<Popover.Root bind:open={networkModePickerOpen}>
+					<Popover.Trigger bind:ref={networkModePickerTriggerRef}>
+						{#snippet child({ props })}
+							<Button
+								{...props}
+								variant="outline"
+								class="w-full justify-between font-normal"
+								role="combobox"
+								aria-expanded={networkModePickerOpen}
+							>
+								<span class="flex items-center min-w-0 flex-1">
+									{#if networkModeType === 'bridge'}
+										<Share2 class="w-3.5 h-3.5 mr-2 shrink-0 text-emerald-500" />
+									{:else if networkModeType === 'host'}
+										<Server class="w-3.5 h-3.5 mr-2 shrink-0 text-sky-500" />
+									{:else if networkModeType === 'none'}
+										<CircleOff class="w-3.5 h-3.5 mr-2 shrink-0 text-muted-foreground" />
+									{:else if networkModeType === 'container'}
+										<Box class="w-3.5 h-3.5 mr-2 shrink-0 text-violet-500" />
+									{:else}
+										<Network class="w-3.5 h-3.5 mr-2 shrink-0 text-orange-500" />
+									{/if}
+									<span class="truncate">{networkModeLabel}</span>
+								</span>
+								<ChevronsUpDown class="w-4 h-4 shrink-0 opacity-50" />
+							</Button>
+						{/snippet}
+					</Popover.Trigger>
+					<Popover.Content class="w-[var(--bits-popover-anchor-width)] p-0" align="start">
+						<Command.Root>
+							<Command.Input placeholder="Filter networks..." />
+							<Command.List class="max-h-64">
+								<Command.Empty>No networks found.</Command.Empty>
+								<Command.Group>
+									<Command.Item value="bridge" onSelect={() => { networkMode = 'bridge'; closeAndFocusNetworkModePicker(); }}>
+										<Share2 class="text-emerald-500" />
+										<span>Bridge</span>
+									</Command.Item>
+									<Command.Item value="host" onSelect={() => { networkMode = 'host'; closeAndFocusNetworkModePicker(); }}>
+										<Server class="text-sky-500" />
+										<span>Host</span>
+									</Command.Item>
+									<Command.Item value="none" onSelect={() => { networkMode = 'none'; closeAndFocusNetworkModePicker(); }}>
+										<CircleOff class="text-muted-foreground" />
+										<span>None</span>
+									</Command.Item>
+									<Command.Item value="container" onSelect={() => { if (!networkMode.startsWith('container:')) networkMode = 'container:'; closeAndFocusNetworkModePicker(); }}>
+										<Box class="text-violet-500" />
+										<span>Container</span>
+									</Command.Item>
+								</Command.Group>
+								{#if customNetworks.length > 0}
+									<Command.Separator />
+									<Command.Group heading="Custom networks">
+										{#each customNetworks as n (n.name)}
+											<Command.Item value={n.name} onSelect={() => { networkMode = n.name; closeAndFocusNetworkModePicker(); }}>
+												<Network class="text-orange-500" />
+												<span class="font-medium">{n.name}</span>
+												<span class="{getDriverBadgeClasses(n.driver)} ml-auto">{n.driver}</span>
+											</Command.Item>
+										{/each}
+									</Command.Group>
+								{/if}
+							</Command.List>
+						</Command.Root>
+					</Popover.Content>
+				</Popover.Root>
+				{#if networkModeType === 'container'}
+					<Popover.Root bind:open={containerPickerOpen}>
+						<Popover.Trigger bind:ref={containerPickerTriggerRef}>
+							{#snippet child({ props })}
+								<Button
+									{...props}
+									variant="outline"
+									class="w-full mt-2 justify-between font-normal"
+									role="combobox"
+									aria-expanded={containerPickerOpen}
+								>
+									<span class="truncate min-w-0 flex-1 text-left {containerRef ? '' : 'text-muted-foreground'}">
+										{containerRef || 'Select a container...'}
+									</span>
+									<ChevronsUpDown class="w-4 h-4 shrink-0 opacity-50" />
+								</Button>
 							{/snippet}
-						</Select.Item>
-						<Select.Item value="host">
-							{#snippet children()}
-								<Server class="w-3.5 h-3.5 mr-2 text-sky-500" />
-								Host
-							{/snippet}
-						</Select.Item>
-						<Select.Item value="none">
-							{#snippet children()}
-								<CircleOff class="w-3.5 h-3.5 mr-2 text-muted-foreground" />
-								None
-							{/snippet}
-						</Select.Item>
-					</Select.Content>
-				</Select.Root>
+						</Popover.Trigger>
+						<Popover.Content class="w-[var(--bits-popover-anchor-width)] p-0" align="start">
+							<Command.Root>
+								<Command.Input placeholder="Filter by name..." />
+								<Command.List class="max-h-64">
+									<Command.Empty>No containers found.</Command.Empty>
+									<Command.Group>
+										{#each availableContainers as c (c.id)}
+											<Command.Item
+												value={c.name}
+												onSelect={() => {
+													networkMode = `container:${c.name}`;
+													closeAndFocusContainerPicker();
+												}}
+											>
+												<Check class={containerRef !== c.name ? 'text-transparent' : ''} />
+												<span class="w-1.5 h-1.5 shrink-0 rounded-full {c.state === 'running' ? 'bg-green-500' : 'bg-muted-foreground/40'}"></span>
+												<span class="font-medium">{c.name}</span>
+												<span class="text-muted-foreground text-xs ml-auto truncate">{c.image}</span>
+											</Command.Item>
+										{/each}
+									</Command.Group>
+								</Command.List>
+							</Command.Root>
+						</Popover.Content>
+					</Popover.Root>
+					{#if !containerRef}
+						<p class="text-xs text-amber-600 mt-1">Select a container to share its network namespace</p>
+					{/if}
+				{/if}
 			</div>
 		</div>
 
@@ -762,38 +1095,65 @@
 		</div>
 	</div>
 
-	<!-- Networks -->
-	{#if availableNetworks.length > 0}
+	<!-- Additional networks (hidden for host/none/container:X modes — Docker rejects extras) -->
+	{#if availableNetworks.length > 0 && networkModeType !== 'host' && networkModeType !== 'none' && networkModeType !== 'container'}
 		<div class="space-y-2">
 			<div class="flex justify-between items-center pb-2 border-b">
 				<div class="flex items-center gap-2">
 					<Network class="w-4 h-4 text-muted-foreground" />
-					<h3 class="text-sm font-semibold text-foreground">Networks</h3>
+					<h3 class="text-sm font-semibold text-foreground">Additional networks</h3>
 				</div>
 			</div>
 
 			<div class="space-y-2">
-				<Select.Root type="single" value="" onValueChange={addNetwork}>
-					<Select.Trigger tabindex={0} class="w-full h-9">
-						<span class="text-muted-foreground">Select network to add...</span>
-					</Select.Trigger>
-					<Select.Content>
-						{#each availableNetworks.filter(n => !selectedNetworks.includes(n.name) && !['bridge', 'host', 'none'].includes(n.name)) as network}
-							<Select.Item value={network.name}>
-								{#snippet children()}
-									<div class="flex items-center justify-between w-full">
-										<span>{network.name}</span>
-										<span class={getDriverBadgeClasses(network.driver)}>{network.driver}</span>
-									</div>
-								{/snippet}
-							</Select.Item>
-						{/each}
-					</Select.Content>
-				</Select.Root>
+				{#if selectableNetworks.length === 0}
+					<Button variant="outline" disabled class="w-full justify-start font-normal text-muted-foreground">
+						All networks already attached
+					</Button>
+				{:else}
+					<Popover.Root bind:open={networkPickerOpen}>
+						<Popover.Trigger bind:ref={networkPickerTriggerRef}>
+							{#snippet child({ props })}
+								<Button
+									{...props}
+									variant="outline"
+									class="w-full justify-between font-normal"
+									role="combobox"
+									aria-expanded={networkPickerOpen}
+								>
+									<span class="text-muted-foreground">Select network to add...</span>
+									<ChevronsUpDown class="w-4 h-4 opacity-50" />
+								</Button>
+							{/snippet}
+						</Popover.Trigger>
+						<Popover.Content class="w-[var(--bits-popover-anchor-width)] p-0" align="start">
+							<Command.Root>
+								<Command.Input placeholder="Filter networks..." />
+								<Command.List class="max-h-64">
+									<Command.Empty>No networks found.</Command.Empty>
+									<Command.Group>
+										{#each selectableNetworks as network (network.name)}
+											<Command.Item
+												value={network.name}
+												onSelect={() => {
+													addNetwork(network.name);
+													closeAndFocusNetworkPicker();
+												}}
+											>
+												<span class="font-medium">{network.name}</span>
+												<span class="{getDriverBadgeClasses(network.driver)} ml-auto">{network.driver}</span>
+											</Command.Item>
+										{/each}
+									</Command.Group>
+								</Command.List>
+							</Command.Root>
+						</Popover.Content>
+					</Popover.Root>
+				{/if}
 
-				{#if selectedNetworks.length > 0}
+				{#if selectedNetworks.filter(n => n !== networkMode).length > 0}
 					<div class="space-y-1 pt-1">
-						{#each selectedNetworks as networkName}
+						{#each selectedNetworks.filter(n => n !== networkMode) as networkName}
 							{@const network = availableNetworks.find(n => n.name === networkName)}
 							{@const isExpanded = expandedNetworks.has(networkName)}
 							<div class="border rounded-md">
@@ -897,28 +1257,33 @@
 
 		<div class="space-y-2">
 			{#each portMappings as mapping, index}
-				<div class="flex gap-2 items-center">
-					<div class="flex-1 relative group/port">
-						<span class="absolute -top-2 left-2 text-2xs text-muted-foreground bg-background px-1">Host</span>
-						<Input bind:value={mapping.hostPort} type="number" class="h-9" />
-						<button
-							type="button"
-							class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-primary transition-colors opacity-0 group-hover/port:opacity-100"
-							onclick={() => findFreePort(index)}
-							disabled={findingFreePort}
-							title="Find next available Docker port"
-						>
-							{#if findingFreePort}
-								<Loader2 class="w-3.5 h-3.5 animate-spin" />
-							{:else}
-								<Search class="w-3.5 h-3.5" />
-							{/if}
-						</button>
-					</div>
-					<div class="flex-1 relative">
-						<span class="absolute -top-2 left-2 text-2xs text-muted-foreground bg-background px-1">Container</span>
-						<Input bind:value={mapping.containerPort} type="number" class="h-9" />
-					</div>
+				{@const parsed = parseHostPort(mapping.hostPort)}
+				{@const hostPortError = validatePort(parsed.hostPort)}
+				{@const hostIpError = validateIp(parsed.hostIp)}
+				{@const containerPortError = validatePort(mapping.containerPort)}
+				<div class="flex flex-col gap-1">
+					<div class="flex gap-2 items-center">
+						<div class="flex-1 relative group/port">
+							<span class="absolute -top-2 left-2 text-2xs text-muted-foreground bg-background px-1">Host</span>
+							<Input bind:value={mapping.hostPort} type="text" placeholder="e.g. 8080 or 127.0.0.1:8080" class="h-9 {(hostPortError || hostIpError) && mapping.hostPort ? 'border-destructive' : ''}" />
+							<button
+								type="button"
+								class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-primary transition-colors opacity-0 group-hover/port:opacity-100"
+								onclick={() => findFreePort(index)}
+								disabled={findingFreePort}
+								title="Find next available Docker port"
+							>
+								{#if findingFreePort}
+									<Loader2 class="w-3.5 h-3.5 animate-spin" />
+								{:else}
+									<Search class="w-3.5 h-3.5" />
+								{/if}
+							</button>
+						</div>
+						<div class="flex-1 relative">
+							<span class="absolute -top-2 left-2 text-2xs text-muted-foreground bg-background px-1">Container</span>
+							<Input bind:value={mapping.containerPort} type="text" placeholder="e.g. 8080 or 8000-8005" class="h-9 {containerPortError && mapping.containerPort ? 'border-destructive' : ''}" />
+						</div>
 					<ToggleGroup
 						value={mapping.protocol}
 						options={protocolOptions}
@@ -935,11 +1300,30 @@
 						<Trash2 class="w-4 h-4" />
 					</Button>
 				</div>
+				{#if (hostPortError && mapping.hostPort) || (hostIpError && mapping.hostPort) || (containerPortError && mapping.containerPort)}
+					<p class="text-xs text-destructive pl-1">{hostIpError || hostPortError || containerPortError}</p>
+				{/if}
+				</div>
 			{/each}
 		</div>
-		<p class="text-2xs text-muted-foreground/60 flex items-center gap-1">
-			<Search class="w-3 h-3" />
-			Hover the host port field and click the search icon to find the next available port. Only checks Docker-published ports.
+		<p class="text-xs text-muted-foreground flex items-center gap-1.5">
+			<Tooltip.Provider>
+				<Tooltip.Root>
+					<Tooltip.Trigger>
+						<CircleHelp class="w-3.5 h-3.5 text-muted-foreground/70 cursor-help shrink-0" />
+					</Tooltip.Trigger>
+					<Tooltip.Content class="max-w-xs text-xs" side="right">
+						<p class="font-medium mb-1">Supported host port formats:</p>
+						<ul class="space-y-0.5 text-muted-foreground">
+							<li><code class="text-foreground">8080</code> — bind to all interfaces</li>
+							<li><code class="text-foreground">127.0.0.1:8080</code> — bind to specific IP</li>
+							<li><code class="text-foreground">8000-8005</code> — port range (container port must also be a range)</li>
+							<li>Leave host port empty for random allocation</li>
+						</ul>
+					</Tooltip.Content>
+				</Tooltip.Root>
+			</Tooltip.Provider>
+			Hover the host port field and click the search icon to find the next available port.
 		</p>
 	</div>
 
@@ -1083,36 +1467,72 @@
 		</button>
 		{#if showResources}
 			<div class="px-3 pb-3 space-y-3 border-t">
-				<p class="text-xs text-muted-foreground pt-2">Configure memory and CPU limits for this container</p>
+				<p class="text-xs text-muted-foreground pt-2">
+					Configure memory and CPU limits for this container.
+					{#if canApplyInPlace}
+						The <CornerDownLeft class="w-3 h-3 inline-block -mt-0.5" /> button next to each field applies the change without restarting.
+					{/if}
+				</p>
+
+				{#snippet inlineApplyBtn(field: InPlaceFieldKey, onclick: () => void)}
+					{#if canApplyInPlace}
+						<Button type="button" variant="outline" size="sm" class="h-9 shrink-0 px-2" disabled={applyingField !== null} {onclick} title="Apply">
+							{#if applyingField === field}
+								<Loader2 class="w-3.5 h-3.5 animate-spin" />
+							{:else}
+								<CornerDownLeft class="w-3.5 h-3.5" />
+							{/if}
+						</Button>
+					{/if}
+				{/snippet}
+
 				<div class="grid grid-cols-2 gap-3">
 					<div class="space-y-1.5">
 						<Label for="memoryLimit" class="text-xs font-medium">Memory limit</Label>
-						<Input id="memoryLimit" bind:value={memoryLimit} placeholder="e.g., 512m, 1g" class="h-9" />
+						<div class="flex items-center gap-1.5">
+							<Input id="memoryLimit" bind:value={memoryLimit} placeholder="e.g., 512m, 1g" class="h-9" />
+							{@render inlineApplyBtn('memory', applyMemoryLimit)}
+						</div>
 					</div>
 					<div class="space-y-1.5">
 						<Label for="memoryReservation" class="text-xs font-medium">Memory reservation</Label>
-						<Input id="memoryReservation" bind:value={memoryReservation} placeholder="e.g., 256m" class="h-9" />
+						<div class="flex items-center gap-1.5">
+							<Input id="memoryReservation" bind:value={memoryReservation} placeholder="e.g., 256m" class="h-9" />
+							{@render inlineApplyBtn('memoryReservation', applyMemoryReservation)}
+						</div>
 					</div>
 				</div>
 				<div class="grid grid-cols-2 gap-3">
 					<div class="space-y-1.5">
 						<Label for="nanoCpus" class="text-xs font-medium">CPU limit</Label>
-						<Input id="nanoCpus" bind:value={nanoCpus} placeholder="e.g., 0.5, 1.5, 2" class="h-9" />
+						<div class="flex items-center gap-1.5">
+							<Input id="nanoCpus" bind:value={nanoCpus} placeholder="e.g., 0.5, 1.5, 2" class="h-9" />
+							{@render inlineApplyBtn('nanoCpus', applyNanoCpus)}
+						</div>
 					</div>
 					<div class="space-y-1.5">
 						<Label for="cpuShares" class="text-xs font-medium">CPU shares</Label>
-						<Input id="cpuShares" bind:value={cpuShares} type="number" placeholder="1024" class="h-9" />
+						<div class="flex items-center gap-1.5">
+							<Input id="cpuShares" bind:value={cpuShares} type="number" placeholder="1024" class="h-9" />
+							{@render inlineApplyBtn('cpuShares', applyCpuShares)}
+						</div>
 					</div>
 				</div>
 				<div class="grid grid-cols-2 gap-3">
 					<div class="space-y-1.5">
 						<Label for="cpuQuota" class="text-xs font-medium">CPU quota</Label>
-						<Input id="cpuQuota" bind:value={cpuQuota} type="number" placeholder="e.g., 50000" class="h-9" />
+						<div class="flex items-center gap-1.5">
+							<Input id="cpuQuota" bind:value={cpuQuota} type="number" placeholder="e.g., 50000" class="h-9" />
+							{@render inlineApplyBtn('cpuQuota', applyCpuQuota)}
+						</div>
 						<p class="text-xs text-muted-foreground">Microseconds per period</p>
 					</div>
 					<div class="space-y-1.5">
 						<Label for="cpuPeriod" class="text-xs font-medium">CPU period</Label>
-						<Input id="cpuPeriod" bind:value={cpuPeriod} type="number" placeholder="Default: 100000" class="h-9" />
+						<div class="flex items-center gap-1.5">
+							<Input id="cpuPeriod" bind:value={cpuPeriod} type="number" placeholder="Default: 100000" class="h-9" />
+							{@render inlineApplyBtn('cpuPeriod', applyCpuPeriod)}
+						</div>
 						<p class="text-xs text-muted-foreground">Period in microseconds</p>
 					</div>
 				</div>

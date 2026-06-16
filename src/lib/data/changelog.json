@@ -1,5 +1,82 @@
 [
   {
+    "version": "1.0.33",
+    "date": "2026-06-15",
+    "changes": [
+      { "type": "feature", "text": "in-place container property updates without restart — restart policy, CPU/memory limits (#1153)" },
+      { "type": "feature", "text": "clickable stack badge in container and volume inspect modals (#1121)" },
+      { "type": "feature", "text": "clickable stack badge in volumes list row (#1122)" },
+      { "type": "feature", "text": "volumes list shows driver_opts type (NFS, CIFS, etc.) with sort and filter (#1123)" },
+      { "type": "feature", "text": "Bark iOS notifications (#1095, PR#1097, @undirectlookable)" },
+      { "type": "feature", "text": "Signal notifications via signal-cli-rest-api (#1099)" },
+      { "type": "feature", "text": "Apprise passthrough — forward to a self-hosted caronc/apprise-api server (#1099)" },
+      { "type": "fix", "text": "env editor flagged Docker/Compose built-ins as MISSING (#141)" },
+      { "type": "fix", "text": "YAML editor indentation was inconsistent when pressing Enter (#1156)" },
+      { "type": "feature", "text": "`dockhand.update=false`, `dockhand.hidden=true` and `localhost/*` images skip registry polling (#1083)" },
+      { "type": "fix", "text": "registry authentication for image pulls (#1105)" },
+      { "type": "feature", "text": "native HTTPS listener, off by default (#1102)" },
+      { "type": "fix", "text": "environments stuck \"Failed\" after VPN/Tailscale tunnel drops until agent restart (#1160)" },
+      { "type": "fix", "text": "health_status events flooding container_events table (#1165)" },
+      { "type": "fix", "text": "git stack sync removes files deleted from the repo (hash-verified) (#966, #1162)" },
+      { "type": "feature", "text": "upload TLS/mTLS certificate files in environment editor (#125)" },
+      { "type": "feature", "text": "syntax highlighting for shell, Dockerfile, TOML, INI/conf and .env files in the file browser viewer (#1055)" },
+      { "type": "feature", "text": "Animated icons now configurable (#1169)" },
+      { "type": "fix", "text": "stack deploys ignored the env's configured socket path (#1172)" },
+      { "type": "fix", "text": "environment names with characters that break path resolution (e.g. `*`) are now rejected (#1179)" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.33"
+  },
+  {
+    "version": "1.0.32",
+    "date": "2026-06-06",
+    "changes": [
+      { "type": "feature", "text": "container details tweaks: process count, label filter, copy all labels (#812)" },
+      { "type": "feature", "text": "log improvements (#1130)" },
+      { "type": "fix", "text": "cleared Resources fields not persisted on container edit (#1119)" },
+      { "type": "fix", "text": "long container names overflowed in activity event details dialog (#1129)" },
+      { "type": "fix", "text": "git stack recreate and start operations ignored Dockhand-stored env vars (#1132)" },
+      { "type": "fix", "text": "dashboard stopped count reset to 0 after refresh for gracefully stopped containers (#1133)" },
+      { "type": "fix", "text": "auto-update preserves runtime `-e` env and `-l` label overrides (#1135)" },
+      { "type": "fix", "text": "git stack volume binds resolved to wrong host path when compose was in a subdirectory (#1139)" },
+      { "type": "fix", "text": "git stacks: subdir compose files now find their adjacent env files (#1136)" },
+      { "type": "feature", "text": "env editor doesn't flag Docker/Compose built-in variables as unused (#141)" },
+      { "type": "feature", "text": "container network mode: share another container's network namespace (#161)" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.32"
+  },
+  {
+    "version": "1.0.31",
+    "date": "2026-05-30",
+    "changes": [
+      { "type": "fix", "text": "502 Bad Gateway behind nginx-based reverse proxies — SvelteKit 2.51+ bloated the Link response header, pinned to 2.50.0 (#1114)" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.31"
+  },
+  {
+    "version": "1.0.30",
+    "date": "2026-05-30",
+    "changes": [
+      { "type": "feature", "text": "time range filter for log viewer — filter logs by From/To date and time (#1068)" },
+      { "type": "feature", "text": "configurable tail line count in log viewer — choose from 100 to all lines (#1066)" },
+      { "type": "feature", "text": "toggleable line numbers in log viewer (#1067)" },
+      { "type": "feature", "text": "\"some unused\" image filter — show images with both used and unused tags for selective cleanup (#621)" },
+      { "type": "feature", "text": "IP binding and port ranges in container port mappings (#581)" },
+      { "type": "feature", "text": "remove individual containers directly from stacks page (#576)" },
+      { "type": "fix", "text": "scan cache lookup by tag name never matched — results now resolved via image digest (#1064)" },
+      { "type": "fix", "text": "image-baked env vars not updated during auto-update container recreation (#1061)" },
+      { "type": "fix", "text": "git stack deploy via Hawser fails with \"Invalid string length\" when repo has large files (#1040)" },
+      { "type": "feature", "text": "Gotify notification priority via URL query param — gotify://host/token?priority=5 (#1033)" },
+      { "type": "fix", "text": "consistent action button order across container and stack views (#1079)" },
+      { "type": "feature", "text": "named custom URL labels — dockhand.url=[Name](https://...) markdown syntax (#1065)" },
+      { "type": "fix", "text": "HTTPS git credentials no longer leaked in process arguments (#1081)" },
+      { "type": "feature", "text": "bump Docker Compose to 5.1.4 (GHSA-pmwq-pjrm-6p5r)" },
+      { "type": "feature", "text": "dockhand.order label to control container display order within stacks (#847)" },
+      { "type": "feature", "text": "live network attach/detach for running containers — join or leave Docker networks without restarting (#1051)" },
+      { "type": "fix", "text": "environment variable values with nested quotes progressively corrupted on each save (#1036, #1086)" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.30"
+  },
+  {
     "version": "1.0.29",
     "date": "2026-05-17",
     "changes": [

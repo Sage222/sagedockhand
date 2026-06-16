@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto';
 import type { Environment } from './db';
 import { getStackEnvVarsAsRecord } from './db';
 import { getAdditionalVolumeBinds } from './mount-dedupe';
+import { encodeRegistryAuth } from './registry-auth';
 import { isSystemContainer } from './scheduler/tasks/update-utils';
 import { deepDiff } from '../utils/diff.js';
 
@@ -286,7 +287,7 @@ const envCache = new Map<number, CachedEnv>();
 const CACHE_TTL = 30 * 60 * 1000;
 
 // All known Docker Hub hostname variations for credential matching
-const DOCKER_HUB_HOSTS = new Set([
+export const DOCKER_HUB_HOSTS = new Set([
 	'docker.io', 'hub.docker.com', 'registry.hub.docker.com',
 	'index.docker.io', 'registry-1.docker.io', 'registry.docker.io', 'docker.com'
 ]);
@@ -1215,13 +1216,81 @@ export async function renameContainer(id: string, newName: string, envId?: numbe
 	await assertDockerResponse(response);
 }
 
-export async function getContainerLogs(id: string, tail = 100, envId?: number | null): Promise<string> {
+/**
+ * In-place container property update. Wraps Docker's POST /containers/{id}/update,
+ * which is the only API that changes container properties WITHOUT recreating it.
+ *
+ * The accepted body field set is fixed by Docker — anything outside this set
+ * requires container recreation (image, env, ports, networks, mounts, etc).
+ * Whitelist enforced here so callers can't accidentally smuggle a
+ * recreate-only field through this code path.
+ */
+export const IN_PLACE_UPDATE_FIELDS = [
+	// Restart policy — the headline use case (#1153)
+	'RestartPolicy',
+	// CPU
+	'CpuShares', 'CpuPeriod', 'CpuQuota', 'CpuRealtimePeriod', 'CpuRealtimeRuntime',
+	'CpusetCpus', 'CpusetMems', 'NanoCpus',
+	// Memory
+	'Memory', 'MemorySwap', 'MemoryReservation', 'MemorySwappiness', 'KernelMemory',
+	// Block I/O
+	'BlkioWeight', 'BlkioWeightDevice',
+	'BlkioDeviceReadBps', 'BlkioDeviceWriteBps',
+	'BlkioDeviceReadIOps', 'BlkioDeviceWriteIOps',
+	// Misc
+	'PidsLimit'
+] as const;
+export type InPlaceUpdateField = typeof IN_PLACE_UPDATE_FIELDS[number];
+
+export interface UpdateContainerRuntimeResult {
+	Warnings: string[] | null;
+}
+
+/**
+ * Apply an in-place update. `updates` keys MUST be from IN_PLACE_UPDATE_FIELDS;
+ * unknown keys are silently dropped (not passed to Docker) so a malicious or
+ * confused caller can't sneak a recreate-only field through.
+ */
+export async function updateContainerRuntime(
+	id: string,
+	updates: Partial<Record<InPlaceUpdateField, unknown>>,
+	envId?: number | null
+): Promise<UpdateContainerRuntimeResult> {
+	const allowed = new Set<string>(IN_PLACE_UPDATE_FIELDS);
+	const body: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(updates)) {
+		if (allowed.has(key) && value !== undefined) body[key] = value;
+	}
+	if (Object.keys(body).length === 0) {
+		throw new Error('No updatable fields provided');
+	}
+	return dockerJsonRequest<UpdateContainerRuntimeResult>(
+		`/containers/${id}/update`,
+		{ method: 'POST', body: JSON.stringify(body) },
+		envId
+	);
+}
+
+export async function getContainerLogs(id: string, tail: number | 'all' = 100, envId?: number | null, since?: string, until?: string): Promise<string> {
 	// Check if container has TTY enabled
 	const info = await inspectContainer(id, envId);
 	const hasTty = info.Config?.Tty ?? false;
 
+	let query = `stdout=true&stderr=true&timestamps=true`;
+	if (tail === 'all') {
+		query += `&tail=all`;
+	} else {
+		query += `&tail=${tail}`;
+	}
+	if (since) {
+		query += `&since=${since}`;
+	}
+	if (until) {
+		query += `&until=${until}`;
+	}
+
 	const response = await dockerFetch(
-		`/containers/${id}/logs?stdout=true&stderr=true&tail=${tail}&timestamps=true`,
+		`/containers/${id}/logs?${query}`,
 		{},
 		envId
 	);
@@ -1285,6 +1354,11 @@ export interface CreateContainerOptions {
 	restartPolicy?: string;
 	restartMaxRetries?: number;
 	networkMode?: string;
+	/** Additional networks attached after creation via POST /networks/<name>/connect.
+	 *  Must NOT include the primary (which lives in networkMode + EndpointsConfig). */
+	additionalNetworks?: string[];
+	/** @deprecated use networkMode + additionalNetworks. Kept only so old callers
+	 *  (auto-update inspect path) keep working — see backward-compat block below. */
 	networks?: string[];
 	/** Network aliases for the primary network */
 	networkAliases?: string[];
@@ -1440,92 +1514,67 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 		containerConfig.Volumes = options.volumes;
 	}
 
-	if (options.networkMode) {
-		containerConfig.HostConfig.NetworkMode = options.networkMode;
-
-		// Build endpoint config for primary network with aliases, static IP, and gateway priority
-		const hasNetworkConfig = options.networkAliases?.length || options.networkIpv4Address || options.networkIpv6Address || options.networkGwPriority !== undefined;
-		if (hasNetworkConfig) {
-			const endpointConfig: any = {};
-
-			if (options.networkAliases && options.networkAliases.length > 0) {
-				endpointConfig.Aliases = options.networkAliases;
-			}
-
-			if (options.networkIpv4Address || options.networkIpv6Address) {
-				endpointConfig.IPAMConfig = {};
-				if (options.networkIpv4Address) {
-					endpointConfig.IPAMConfig.IPv4Address = options.networkIpv4Address;
-				}
-				if (options.networkIpv6Address) {
-					endpointConfig.IPAMConfig.IPv6Address = options.networkIpv6Address;
-				}
-			}
-
-			// Gateway priority (Docker Engine 28+)
-			if (options.networkGwPriority !== undefined) {
-				endpointConfig.GwPriority = options.networkGwPriority;
-			}
-
-			containerConfig.NetworkingConfig = {
-				EndpointsConfig: {
-					[options.networkMode]: endpointConfig
-				}
-			};
-		}
+	// Backward-compat: callers (and the auto-update inspect path) may still pass
+	// the legacy "networks" array which conflated primary + extras. Normalize to
+	// the new model: anything that isn't the primary becomes an additional network.
+	if (options.networks && !options.additionalNetworks) {
+		const primary = options.networkMode || '';
+		options.additionalNetworks = options.networks.filter(n => n !== primary);
 	}
 
-	if (options.networks && options.networks.length > 0) {
-		containerConfig.HostConfig.NetworkMode = options.networks[0];
+	// Networking model:
+	//   - networkMode is the SINGLE source of truth for the primary network
+	//   - EndpointsConfig has exactly ONE entry, keyed by networkMode, carrying
+	//     the form's IPv4/IPv6/aliases/gwPriority
+	//   - additionalNetworks (extras only — NEVER includes the primary) are
+	//     attached after container creation via POST /networks/{name}/connect
+	//   - Shared modes (host / none / container:X / service:X) skip both
+	//     EndpointsConfig and additionalNetworks: Docker rejects them.
+	const primaryMode = options.networkMode || '';
+	const isSharedMode = primaryMode === 'host' || primaryMode === 'none' || primaryMode.startsWith('container:') || primaryMode.startsWith('service:');
 
-		// Build endpoint configs for all networks
-		const endpointsConfig: Record<string, any> = {};
+	if (primaryMode) {
+		containerConfig.HostConfig.NetworkMode = primaryMode;
+	}
 
-		for (const network of options.networks) {
-			const isFirstNetwork = network === options.networks[0];
-			const netCfg = options.networkConfigs?.[network];
+	// Build the single EndpointsConfig entry for the primary (only for non-shared modes).
+	if (primaryMode && !isSharedMode) {
+		const endpointConfig: any = {};
+		if (options.networkAliases?.length) {
+			endpointConfig.Aliases = options.networkAliases;
+		}
+		if (options.networkIpv4Address || options.networkIpv6Address) {
+			endpointConfig.IPAMConfig = {};
+			if (options.networkIpv4Address) endpointConfig.IPAMConfig.IPv4Address = options.networkIpv4Address;
+			if (options.networkIpv6Address) endpointConfig.IPAMConfig.IPv6Address = options.networkIpv6Address;
+		}
+		if (options.networkGwPriority !== undefined) {
+			endpointConfig.GwPriority = options.networkGwPriority;
+		}
+		containerConfig.NetworkingConfig = {
+			EndpointsConfig: {
+				[primaryMode]: endpointConfig
+			}
+		};
+	}
+
+	// Extras attached after creation. Empty array for shared modes.
+	const extraNetworks: { name: string; config: any }[] = [];
+	if (!isSharedMode && options.additionalNetworks?.length) {
+		for (const netName of options.additionalNetworks) {
+			if (netName === primaryMode) continue;  // primary lives in EndpointsConfig, not here
+			const netCfg = options.networkConfigs?.[netName];
 			const endpointConfig: any = {};
-
-			// Per-network config from networkConfigs (takes precedence)
 			if (netCfg) {
-				if (netCfg.aliases && netCfg.aliases.length > 0) {
-					endpointConfig.Aliases = netCfg.aliases;
-				}
+				if (netCfg.aliases?.length) endpointConfig.Aliases = netCfg.aliases;
 				if (netCfg.ipv4Address || netCfg.ipv6Address) {
 					endpointConfig.IPAMConfig = {};
-					if (netCfg.ipv4Address) {
-						endpointConfig.IPAMConfig.IPv4Address = netCfg.ipv4Address;
-					}
-					if (netCfg.ipv6Address) {
-						endpointConfig.IPAMConfig.IPv6Address = netCfg.ipv6Address;
-					}
-				}
-			} else if (isFirstNetwork) {
-				// Backward compat: apply flat fields to first network if no networkConfigs
-				if (options.networkAliases && options.networkAliases.length > 0) {
-					endpointConfig.Aliases = options.networkAliases;
-				}
-				if (options.networkIpv4Address || options.networkIpv6Address) {
-					endpointConfig.IPAMConfig = {};
-					if (options.networkIpv4Address) {
-						endpointConfig.IPAMConfig.IPv4Address = options.networkIpv4Address;
-					}
-					if (options.networkIpv6Address) {
-						endpointConfig.IPAMConfig.IPv6Address = options.networkIpv6Address;
-					}
-				}
-				// Gateway priority (Docker Engine 28+)
-				if (options.networkGwPriority !== undefined) {
-					endpointConfig.GwPriority = options.networkGwPriority;
+					if (netCfg.ipv4Address) endpointConfig.IPAMConfig.IPv4Address = netCfg.ipv4Address;
+					if (netCfg.ipv6Address) endpointConfig.IPAMConfig.IPv6Address = netCfg.ipv6Address;
 				}
 			}
-
-			endpointsConfig[network] = endpointConfig;
+			extraNetworks.push({ name: netName, config: endpointConfig });
 		}
-
-		containerConfig.NetworkingConfig = {
-			EndpointsConfig: endpointsConfig
-		};
 	}
 
 	if (options.privileged !== undefined) {
@@ -1758,6 +1807,39 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 		containerConfig.Domainname = options.domainname;
 	}
 
+	// Shared network modes (host / container:X / service:X) inherit the
+	// namespace's networking, so Docker rejects any field that would override it.
+	// Strip them defensively — the merge in updateContainer carries values from
+	// the old config that may not be valid for the new mode (e.g. switching from
+	// bridge → container:foo with a leftover Hostname).
+	// Mirrors the same logic in recreateContainerFromInspect.
+	{
+		const primary = containerConfig.HostConfig?.NetworkMode || '';
+		const isHost = primary === 'host';
+		const isContainer = primary.startsWith('container:');
+		const isService = primary.startsWith('service:');
+		if (isHost || isContainer || isService) {
+			delete containerConfig.Hostname;
+			delete containerConfig.Domainname;
+			delete containerConfig.MacAddress;
+		}
+		if (isContainer || isService) {
+			// container:X also shares ports / DNS / hosts with the target
+			delete containerConfig.ExposedPorts;
+			if (containerConfig.HostConfig) {
+				delete containerConfig.HostConfig.PortBindings;
+				delete containerConfig.HostConfig.PublishAllPorts;
+				delete containerConfig.HostConfig.Dns;
+				delete containerConfig.HostConfig.DnsOptions;
+				delete containerConfig.HostConfig.DnsSearch;
+				delete containerConfig.HostConfig.ExtraHosts;
+				delete containerConfig.HostConfig.Links;
+			}
+			// NetworkingConfig is meaningless when sharing a namespace
+			delete containerConfig.NetworkingConfig;
+		}
+	}
+
 	const result = await dockerJsonRequest<{ Id: string }>(
 		`/containers/create?name=${encodeURIComponent(options.name)}`,
 		{
@@ -1766,6 +1848,18 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 		},
 		envId
 	);
+
+	// Attach additional networks now that the container exists. Docker only allows
+	// a single network at create time, so anything beyond the primary is connected here.
+	for (const extra of extraNetworks) {
+		try {
+			await connectContainerToNetworkRaw(extra.name, result.Id, extra.config, envId);
+		} catch (err: any) {
+			console.error(`Failed to attach additional network "${extra.name}":`, err?.message || err);
+			// Don't fail the whole create — primary network is already connected.
+			// Caller (updateContainer rollback path) will surface this if needed.
+		}
+	}
 
 	return { id: result.Id, start: () => startContainer(result.Id, envId) };
 }
@@ -1886,40 +1980,6 @@ export async function recreateContainerFromInspect(
 		Image: newImage,
 		HostConfig: hostConfig
 	};
-
-	// 4a. Update image-embedded labels to match the new image.
-	// Docker's create API uses exactly the labels you pass, ignoring the new image's
-	// embedded labels. We inspect both old and new images to distinguish image-origin
-	// labels from user-set labels, then merge accordingly.
-	try {
-		const [oldImageInspect, newImageInspect] = await Promise.all([
-			inspectImage(config.Image, envId),
-			inspectImage(newImage, envId)
-		]);
-		const oldImageLabels: Record<string, string> = (oldImageInspect as any)?.Config?.Labels || {};
-		const newImageLabels: Record<string, string> = (newImageInspect as any)?.Config?.Labels || {};
-		const containerLabels: Record<string, string> = createConfig.Labels || {};
-
-		const mergedLabels: Record<string, string> = {};
-
-		// Keep user-set labels (not present in old image)
-		for (const [k, v] of Object.entries(containerLabels)) {
-			if (!(k in oldImageLabels)) {
-				mergedLabels[k] = v;
-			}
-		}
-
-		// Add all new image labels (overrides old image labels)
-		for (const [k, v] of Object.entries(newImageLabels)) {
-			mergedLabels[k] = v;
-		}
-
-		createConfig.Labels = mergedLabels;
-		log?.(`Updated image labels: ${Object.keys(newImageLabels).length} from new image, ${Object.keys(mergedLabels).length} total`);
-	} catch (e) {
-		log?.(`Warning: could not update image labels: ${e}`);
-		// Fall through with old labels — non-fatal
-	}
 
 	// Strip default MemorySwappiness — Podman + cgroupv2 rejects it.
 	// Docker returns -1, Podman returns 0 when unset.
@@ -2400,20 +2460,44 @@ export async function updateContainer(id: string, options: Partial<CreateContain
 	// Extract ALL existing container options
 	const existingOptions = extractContainerOptions(oldContainerInfo);
 
-	// Merge user-provided options on top of existing options
-	// User options take precedence, but we preserve everything not explicitly provided
+	// Per-network fields (aliases, static IPs, MAC, gateway priority) are scoped to
+	// a single network. When the user switches the primary network, the values
+	// extracted from the old network must NOT follow the container — e.g. compose
+	// service aliases from "anton" applied to the default bridge fail with
+	// "invalid endpoint settings" because the default bridge doesn't accept aliases.
+	if (options.networkMode && options.networkMode !== networkMode) {
+		existingOptions.networkAliases = undefined;
+		existingOptions.networkIpv4Address = undefined;
+		existingOptions.networkIpv6Address = undefined;
+		existingOptions.networkGwPriority = undefined;
+		existingOptions.macAddress = undefined;
+	}
+
+	// Merge user-provided options on top of existing options.
+	// Semantics (#1119):
+	//   - key absent from `options`          → preserve existingOptions[key]
+	//   - key present with explicit `null`   → CLEAR the field (treat as undefined)
+	//   - key present with any other value   → use the user's value
+	//
+	// Without the null-as-clear handling, clearing a Resources field in the UI
+	// (which sends null) would merge over the existing value identically to a
+	// preserved field — Memory limit, etc. would silently stick around.
+	const userOptions: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(options)) {
+		userOptions[k] = v === null ? undefined : v;
+	}
 	const mergedOptions: CreateContainerOptions = {
 		...existingOptions,
-		...options,
+		...userOptions,
 		// Replace labels, but preserve Docker internal labels (com.docker.*)
-		labels: options.labels !== undefined
+		labels: options.labels !== undefined && options.labels !== null
 			? {
 					...Object.fromEntries(
 						Object.entries(existingOptions.labels || {}).filter(([k]) => k.startsWith('com.docker.'))
 					),
 					...options.labels
 				}
-			: existingOptions.labels
+			: options.labels === null ? {} : existingOptions.labels
 	};
 
 	// 1. Stop old container
@@ -2526,6 +2610,28 @@ export async function listImages(envId?: number | null): Promise<ImageInfo[]> {
 }
 
 /**
+ * Diagnostic log for registry auth headers (#1105).
+ * Logs lengths and boundary char codes — never the plaintext credentials.
+ * Header prefix is safe to log: it encodes the start of `{"username":"...`.
+ */
+function logAuthDiagnostics(
+	tag: string,
+	registry: string,
+	serveraddress: string,
+	username: string,
+	password: string,
+	authHeader: string
+): void {
+	const userLast = username.length ? username.charCodeAt(username.length - 1).toString(16) : 'na';
+	const pwLast = password.length ? password.charCodeAt(password.length - 1).toString(16) : 'na';
+	console.log(
+		`${tag} auth: registry=${registry} user(len=${username.length},last=0x${userLast}) ` +
+		`pw(len=${password.length},last=0x${pwLast}) serveraddress=${serveraddress} ` +
+		`authHeader(len=${authHeader.length},prefix=${authHeader.slice(0, 16)})`
+	);
+}
+
+/**
  * Build X-Registry-Auth header for authenticated Docker image pulls.
  * Looks up stored registry credentials and returns a headers object
  * with the base64-encoded auth config, or an empty object if no credentials found.
@@ -2538,16 +2644,19 @@ export async function buildRegistryAuthHeader(imageName: string): Promise<Record
 		if (creds) {
 			// Docker Engine requires 'https://index.docker.io/v1/' as serveraddress
 			// for Docker Hub auth — just the hostname is treated as unauthenticated
-			const serveraddress = DOCKER_HUB_HOSTS.has(registry)
-				? 'https://index.docker.io/v1/'
-				: registry;
-			console.log(`[Pull] Using credentials for ${serveraddress} (user: ${creds.username})`);
+			const isHub = DOCKER_HUB_HOSTS.has(registry);
+			const serveraddress = isHub ? 'https://index.docker.io/v1/' : registry;
+			if (isHub) {
+				console.log(`[Registry] docker-hub variant '${registry}' canonicalized to https://index.docker.io/v1/ for auth`);
+			}
 			const authConfig = {
 				username: creds.username,
 				password: creds.password,
 				serveraddress
 			};
-			headers['X-Registry-Auth'] = Buffer.from(JSON.stringify(authConfig)).toString('base64');
+			const authHeader = encodeRegistryAuth(authConfig);
+			headers['X-Registry-Auth'] = authHeader;
+			logAuthDiagnostics('[Pull]', registry, serveraddress, creds.username, creds.password, authHeader);
 		} else {
 			console.log(`[Pull] No credentials found for ${registry}`);
 		}
@@ -2590,11 +2699,19 @@ export async function pullImage(imageName: string, onProgress?: (data: any) => v
 	// Look up registry credentials for authenticated pulls
 	const headers = await buildRegistryAuthHeader(imageName);
 
+	// Diagnostic logging (#1105): what we're sending to the daemon
+	console.log(`[Pull] POST ${url} headers=${Object.keys(headers).join(',') || '(none)'}`);
+
 	// Use streaming: true for longer timeout on edge environments
 	const response = await dockerFetch(url, { method: 'POST', streaming: true, headers }, envId);
 
+	// Diagnostic logging (#1105): daemon response status
+	console.log(`[Pull] response status=${response.status} ${response.statusText}`);
+
 	if (!response.ok) {
-		throw new Error(`Failed to pull image: ${await response.text()}`);
+		const body = await response.text();
+		console.error(`[Pull] error body: ${body}`);
+		throw new Error(`Failed to pull image: ${body}`);
 	}
 
 	// Stream the response for progress updates
@@ -2616,6 +2733,9 @@ export async function pullImage(imageName: string, onProgress?: (data: any) => v
 			if (line.trim()) {
 				try {
 					const data = JSON.parse(line);
+					if (data.error || data.errorDetail) {
+						console.error(`[Pull] stream error: ${line}`);
+					}
 					if (onProgress) onProgress(data);
 				} catch {
 					// Ignore parse errors
@@ -2752,7 +2872,10 @@ async function findRegistryCredentials(registryHost: string): Promise<{ username
 			if (stored.fullRegistry === requested.fullRegistry ||
 			    (stored.host === requested.host && !stored.path)) {
 				if (reg.username && reg.password) {
-					return { username: reg.username, password: reg.password };
+					const via = stored.fullRegistry === requested.fullRegistry ? 'full' : 'host-only';
+					console.log(`[Registry] matched stored=${reg.url} requested=${registryHost} via=${via}`);
+					// Normalize legacy creds saved before #1105 trim fix
+					return { username: reg.username.trim(), password: reg.password.trim() };
 				}
 			}
 		}
@@ -2764,12 +2887,20 @@ async function findRegistryCredentials(registryHost: string): Promise<{ username
 				const stored = parseRegistryUrl(reg.url);
 				if (DOCKER_HUB_HOSTS.has(stored.host)) {
 					if (reg.username && reg.password) {
-						return { username: reg.username, password: reg.password };
+						console.log(`[Registry] matched stored=${reg.url} requested=${registryHost} via=hub-alias`);
+						return { username: reg.username.trim(), password: reg.password.trim() };
 					}
 				}
 			}
 		}
 
+		// No match — log what we tried so support cases are diagnosable
+		const candidates = registries.map(r => parseRegistryUrl(r.url).host).join(', ');
+		console.log(
+			`[Registry] no match for requested=${registryHost} ` +
+			`(hub-alias=${DOCKER_HUB_HOSTS.has(requested.host)}); ` +
+			`candidates=[${candidates || 'none configured'}]`
+		);
 		return null;
 	} catch (e) {
 		const errorMsg = e instanceof Error ? e.message : String(e);
@@ -2847,10 +2978,14 @@ async function getRegistryBearerToken(registry: string, repo: string): Promise<s
 		const service = serviceMatch ? serviceMatch[1] : '';
 		const scope = `repository:${repo}:pull`;
 
-		// Step 3: Request token from realm (with credentials if available)
+		// Step 3: Request token from realm (with credentials if available).
+		// Empty scope is allowed — means "no specific resource permission".
+		// Useful for credential validation: some registries (Docker Hub)
+		// reject privileged scopes like registry:catalog:* even for valid
+		// users, so omitting scope is the only reliable login check.
 		const tokenUrl = new URL(realm);
 		if (service) tokenUrl.searchParams.set('service', service);
-		tokenUrl.searchParams.set('scope', scope);
+		if (scope) tokenUrl.searchParams.set('scope', scope);
 
 		const tokenHeaders: Record<string, string> = { 'User-Agent': 'Dockhand/1.0' };
 
@@ -2964,10 +3099,14 @@ export async function getRegistryAuthHeader(
 		const realm = realmMatch[1];
 		const service = serviceMatch ? serviceMatch[1] : '';
 
-		// Step 3: Request token from realm (with credentials if available)
+		// Step 3: Request token from realm (with credentials if available).
+		// Empty scope is allowed — means "no specific resource permission".
+		// Useful for credential validation: some registries (Docker Hub)
+		// reject privileged scopes like registry:catalog:* even for valid
+		// users, so omitting scope is the only reliable login check.
 		const tokenUrl = new URL(realm);
 		if (service) tokenUrl.searchParams.set('service', service);
-		tokenUrl.searchParams.set('scope', scope);
+		if (scope) tokenUrl.searchParams.set('scope', scope);
 
 		const tokenHeaders: Record<string, string> = { 'User-Agent': 'Dockhand/1.0' };
 
@@ -3109,6 +3248,17 @@ export async function checkImageUpdateAvailable(
 			return {
 				hasUpdate: false,
 				currentDigest: imageName.split('@')[1] // Extract the digest part
+			};
+		}
+
+		// Skip update check for images tagged against a localhost registry.
+		// These never resolve from inside Dockhand's container and only produce
+		// ECONNREFUSED noise (see #1083).
+		if (/^localhost(:\d+)?\//.test(imageName)) {
+			return {
+				hasUpdate: false,
+				isLocalImage: true,
+				currentDigest: currentImageId
 			};
 		}
 
@@ -3442,7 +3592,11 @@ export async function listVolumes(envId?: number | null): Promise<VolumeInfo[]> 
 		scope: volume.Scope,
 		created: volume.CreatedAt,
 		labels: volume.Labels || {},
-		usedBy: volumeUsageMap.get(volume.Name) || []
+		usedBy: volumeUsageMap.get(volume.Name) || [],
+		// Surface driver_opts (e.g. NFS/CIFS type+device+o) so the UI can
+		// distinguish network-backed volumes from plain local ones. Docker's
+		// /volumes endpoint already includes this — we were dropping it.
+		options: volume.Options && Object.keys(volume.Options).length > 0 ? volume.Options : undefined
 	}));
 }
 
@@ -4430,11 +4584,21 @@ export async function pushImage(
 	// Parse tag to get registry info
 	const [repo, tag = 'latest'] = imageTag.split(':');
 
-	// Create X-Registry-Auth header
-	const authHeader = Buffer.from(JSON.stringify(authConfig)).toString('base64');
+	const authHeader = encodeRegistryAuth(authConfig);
+	logAuthDiagnostics(
+		'[Push]',
+		authConfig.serveraddress,
+		authConfig.serveraddress,
+		authConfig.username ?? '',
+		authConfig.password ?? '',
+		authHeader
+	);
+
+	const pushUrl = `/images/${encodeURIComponent(imageTag)}/push`;
+	console.log(`[Push] POST ${pushUrl} headers=X-Registry-Auth`);
 
 	const response = await dockerFetch(
-		`/images/${encodeURIComponent(imageTag)}/push`,
+		pushUrl,
 		{
 			method: 'POST',
 			streaming: true,
@@ -4445,8 +4609,11 @@ export async function pushImage(
 		envId
 	);
 
+	console.log(`[Push] response status=${response.status} ${response.statusText}`);
+
 	if (!response.ok) {
 		const error = await response.text();
+		console.error(`[Push] error body: ${error}`);
 		throw new Error(`Failed to push image: ${error}`);
 	}
 
@@ -4470,6 +4637,7 @@ export async function pushImage(
 				try {
 					const data = JSON.parse(line);
 					if (data.error) {
+						console.error(`[Push] stream error: ${line}`);
 						throw new Error(data.error);
 					}
 					if (onProgress) onProgress(data);

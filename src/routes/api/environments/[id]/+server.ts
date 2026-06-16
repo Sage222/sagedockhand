@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { join } from 'path';
-import { existsSync, rmSync } from 'fs';
+import { existsSync, rmSync, renameSync } from 'fs';
 import type { RequestHandler } from './$types';
 import { getEnvironment, updateEnvironment, deleteEnvironment, getEnvironmentPublicIps, setEnvironmentPublicIp, deleteEnvironmentPublicIp, deleteEnvUpdateCheckSettings, deleteImagePruneSettings, getGitStacksForEnvironmentOnly, deleteGitStack } from '$lib/server/db';
 import { clearDockerClientCache } from '$lib/server/docker';
@@ -11,6 +11,7 @@ import { auditEnvironment } from '$lib/server/audit';
 import { refreshSubprocessEnvironments } from '$lib/server/subprocess-manager';
 import { serializeLabels, parseLabels, MAX_LABELS } from '$lib/utils/label-colors';
 import { cleanPem } from '$lib/utils/pem';
+import { validateEnvName } from '$lib/utils/env-name';
 import { unregisterSchedule } from '$lib/server/scheduler';
 import { closeEdgeConnection } from '$lib/server/hawser';
 import { computeAuditDiff } from '$lib/utils/diff';
@@ -63,6 +64,65 @@ export const PUT: RequestHandler = async (event) => {
 		}
 
 		const data = await request.json();
+
+		// #1179: validate name if it's being changed. Existing invalid names are
+		// not auto-corrected — only writes go through this check.
+		const isRename = data.name !== undefined && data.name !== oldEnv.name;
+		if (isRename) {
+			const nameCheck = validateEnvName(data.name);
+			if (!nameCheck.ok) {
+				return json({ error: nameCheck.reason }, { status: 400 });
+			}
+		}
+
+		// Rename on-disk directories BEFORE the DB write. If the fs rename
+		// fails (cross-mount EXDEV, perm error, target exists), we surface a
+		// 409 and leave the DB untouched — better than the previous behavior
+		// of silently orphaning stacks under the old name.
+		//
+		// Applies to ALL connection types. For socket/direct envs the staging
+		// dir IS the deployed dir, so containers need a redeploy after rename
+		// (see client warning). For Hawser envs the agent owns the deployed
+		// dir on the remote host and isn't affected, but Dockhand still keeps
+		// a local staging copy under stacks/<envName>/<stackName>/ (for the
+		// in-app editor) and ALL git stacks clone to git-repos/<envName>/
+		// regardless of where they ultimately deploy — so the rename matters
+		// locally for every env type.
+		if (isRename) {
+			const stacksDir = getStacksDir();
+			const gitReposDir = getGitReposDir();
+			const oldStacks = join(stacksDir, oldEnv.name);
+			const newStacks = join(stacksDir, data.name);
+			const oldRepos = join(gitReposDir, oldEnv.name);
+			const newRepos = join(gitReposDir, data.name);
+
+			// Refuse to overwrite a target dir that already holds someone
+			// else's data.
+			if (existsSync(oldStacks) && existsSync(newStacks)) {
+				return json({
+					error: `Cannot rename: ${newStacks} already exists. Pick a different name or move that directory out of the way.`
+				}, { status: 409 });
+			}
+			if (existsSync(oldRepos) && existsSync(newRepos)) {
+				return json({
+					error: `Cannot rename: ${newRepos} already exists. Pick a different name or move that directory out of the way.`
+				}, { status: 409 });
+			}
+
+			try {
+				if (existsSync(oldStacks)) renameSync(oldStacks, newStacks);
+				if (existsSync(oldRepos)) renameSync(oldRepos, newRepos);
+			} catch (err: any) {
+				// Best-effort rollback if the second rename failed after the first
+				// succeeded. Avoids leaving the filesystem in a split state.
+				try { if (existsSync(newStacks) && !existsSync(oldStacks)) renameSync(newStacks, oldStacks); } catch {}
+				try { if (existsSync(newRepos) && !existsSync(oldRepos)) renameSync(newRepos, oldRepos); } catch {}
+				const code = err?.code === 'EXDEV'
+					? 'EXDEV: stacks dir is on a different filesystem from the rename target. Move it back to the same filesystem to rename this environment.'
+					: (err?.message || 'Rename failed');
+				return json({ error: code }, { status: 409 });
+			}
+		}
 
 		// Clear cached Docker client before updating
 		clearDockerClientCache(id);
@@ -138,11 +198,19 @@ export const DELETE: RequestHandler = async (event) => {
 
 	try {
 		const id = parseInt(params.id);
+		if (isNaN(id) || id <= 0) {
+			return json({ error: 'Invalid environment ID' }, { status: 400 });
+		}
 
 		// Get environment name before deletion for audit log
 		const env = await getEnvironment(id);
 		if (!env) {
 			return json({ error: 'Environment not found' }, { status: 404 });
+		}
+
+		// Safety: never delete directories if env name is empty/whitespace
+		if (!env.name?.trim()) {
+			return json({ error: 'Cannot delete environment with empty name' }, { status: 500 });
 		}
 
 		// Close Edge connection if this is a Hawser Edge environment
@@ -186,10 +254,11 @@ export const DELETE: RequestHandler = async (event) => {
 		unregisterSchedule(id, 'image_prune');
 
 		// Clean up stack directory for this environment
+		// Safety: only delete subdirectory named after the env, never the parent
 		try {
 			const stacksDir = getStacksDir();
 			const envStackDir = join(stacksDir, env.name);
-			if (existsSync(envStackDir)) {
+			if (envStackDir !== stacksDir && envStackDir.startsWith(stacksDir) && existsSync(envStackDir)) {
 				rmSync(envStackDir, { recursive: true, force: true });
 			}
 		} catch (err) {
@@ -200,7 +269,7 @@ export const DELETE: RequestHandler = async (event) => {
 		try {
 			const gitReposDir = getGitReposDir();
 			const envGitDir = join(gitReposDir, env.name);
-			if (existsSync(envGitDir)) {
+			if (envGitDir !== gitReposDir && envGitDir.startsWith(gitReposDir) && existsSync(envGitDir)) {
 				rmSync(envGitDir, { recursive: true, force: true });
 			}
 		} catch (err) {
